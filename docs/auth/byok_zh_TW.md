@@ -117,7 +117,7 @@ func main() {
         Provider: &copilot.ProviderConfig{
             Type:    "openai",
             BaseURL: "https://your-resource.openai.azure.com/openai/v1/",
-            WireApi: "responses",  // 舊款模型請使用 "completions"
+            WireAPI: "responses",  // 舊款模型請使用 "completions"
             APIKey:  os.Getenv("FOUNDRY_API_KEY"),
         },
     })
@@ -132,7 +132,11 @@ func main() {
         panic(err)
     }
 
-    fmt.Println(*response.Data.Content)
+    if response != nil {
+    	if d, ok := response.Data.(*copilot.AssistantMessageData); ok {
+    		fmt.Println(d.Content)
+    	}
+    }
 }
 ```
 
@@ -142,7 +146,7 @@ func main() {
 <summary><strong>.NET</strong></summary>
 
 ```csharp
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
 
 await using var client = new CopilotClient();
 await using var session = await client.CreateSessionAsync(new SessionConfig
@@ -369,14 +373,14 @@ import (
 
 func main() {
     client := copilot.NewClient(&copilot.ClientOptions{
-        OnListModels: func(ctx context.Background) ([]copilot.ModelInfo, error) {
+        OnListModels: func(ctx context.Context) ([]copilot.ModelInfo, error) {
             return []copilot.ModelInfo{
                 {
                     ID:   "my-custom-model",
                     Name: "My Custom Model",
                     Capabilities: copilot.ModelCapabilities{
                         Supports: copilot.ModelSupports{Vision: false, ReasoningEffort: false},
-                        Limits:   copilot.ModelLimits{MaxContextWindowTokens: 128000},
+                        Limits:   copilot.ModelLimits{MaxContextWindowTokens: copilot.Int(128000)},
                     },
                 },
             }, nil
@@ -392,11 +396,11 @@ func main() {
 <summary><strong>.NET</strong></summary>
 
 ```csharp
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
 
 var client = new CopilotClient(new CopilotClientOptions
 {
-    OnListModels = (ct) => Task.FromResult(new List<ModelInfo>
+    OnListModels = (ct) => Task.FromResult<IList<ModelInfo>>(new List<ModelInfo>
     {
         new()
         {

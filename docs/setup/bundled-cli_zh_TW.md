@@ -6,7 +6,7 @@
 
 ## 運作原理
 
-與其依賴全域安裝的 CLI，您可以將 CLI 二進位檔包含在您的應用程式套件中。SDK 透過 `cliPath` 選項指向您打包的副本。
+與其依賴全域安裝的 CLI，您可以將 CLI 二進位檔包含在您的應用程式套件中。SDK 透過 `cliPath` 選項指向您打包的副本；Go 使用 `Connection: copilot.StdioConnection{Path: ...}`。
 
 ```mermaid
 flowchart TB
@@ -120,7 +120,7 @@ func main() {
 	ctx := context.Background()
 
 	client := copilot.NewClient(&copilot.ClientOptions{
-		CLIPath: "./vendor/copilot",
+		Connection: copilot.StdioConnection{Path: "./vendor/copilot"},
 	})
 	if err := client.Start(ctx); err != nil {
 		log.Fatal(err)
@@ -129,14 +129,18 @@ func main() {
 
 	session, _ := client.CreateSession(ctx, &copilot.SessionConfig{Model: "gpt-4.1"})
 	response, _ := session.SendAndWait(ctx, copilot.MessageOptions{Prompt: "你好！"})
-	fmt.Println(*response.Data.Content)
+	if response != nil {
+		if d, ok := response.Data.(*copilot.AssistantMessageData); ok {
+			fmt.Println(d.Content)
+		}
+	}
 }
 ```
 <!-- /docs-validate: hidden -->
 
 ```go
 client := copilot.NewClient(&copilot.ClientOptions{
-    CLIPath:"./vendor/copilot",
+    Connection: copilot.StdioConnection{Path: "./vendor/copilot"},
 })
 if err := client.Start(ctx); err != nil {
     log.Fatal(err)
@@ -145,7 +149,11 @@ defer client.Stop()
 
 session, _ := client.CreateSession(ctx, &copilot.SessionConfig{Model: "gpt-4.1"})
 response, _ := session.SendAndWait(ctx, copilot.MessageOptions{Prompt: "你好！"})
-fmt.Println(*response.Data.Content)
+if response != nil {
+	if d, ok := response.Data.(*copilot.AssistantMessageData); ok {
+		fmt.Println(d.Content)
+	}
+}
 ```
 
 </details>
@@ -156,7 +164,7 @@ fmt.Println(*response.Data.Content)
 ```csharp
 var client = new CopilotClient(new CopilotClientOptions
 {
-    CliPath = Path.Combine(AppContext.BaseDirectory, "vendor", "copilot"),
+    Connection = RuntimeConnection.ForStdio(Path.Combine(AppContext.BaseDirectory, "vendor", "copilot")),
 });
 
 await using var session = await client.CreateSessionAsync(

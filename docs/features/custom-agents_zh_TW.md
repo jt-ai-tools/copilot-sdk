@@ -104,6 +104,7 @@ package main
 import (
 	"context"
 	copilot "github.com/github/copilot-sdk/go"
+	"github.com/github/copilot-sdk/go/rpc"
 )
 
 func main() {
@@ -129,8 +130,8 @@ func main() {
 				Prompt:      "您是一位程式碼編輯器。請根據要求對檔案進行最小程度、精確的修改。",
 			},
 		},
-		OnPermissionRequest: func(req copilot.PermissionRequest, inv copilot.PermissionInvocation) (copilot.PermissionRequestResult, error) {
-			return copilot.PermissionRequestResult{Kind: copilot.PermissionRequestResultKindApproved}, nil
+		OnPermissionRequest: func(req copilot.PermissionRequest, inv copilot.PermissionInvocation) (rpc.PermissionDecision, error) {
+			return &rpc.PermissionDecisionApproveOnce{}, nil
 		},
 	})
 	_ = session
@@ -161,8 +162,8 @@ session, _ := client.CreateSession(ctx, &copilot.SessionConfig{
             Prompt:      "您是一位程式碼編輯器。請根據要求對檔案進行最小程度、精確的修改。",
         },
     },
-    OnPermissionRequest: func(req copilot.PermissionRequest, inv copilot.PermissionInvocation) (copilot.PermissionRequestResult, error) {
-        return copilot.PermissionRequestResult{Kind: copilot.PermissionRequestResultKindApproved}, nil
+    OnPermissionRequest: func(req copilot.PermissionRequest, inv copilot.PermissionInvocation) (rpc.PermissionDecision, error) {
+        return &rpc.PermissionDecisionApproveOnce{}, nil
     },
 })
 ```
@@ -173,7 +174,8 @@ session, _ := client.CreateSession(ctx, &copilot.SessionConfig{
 <summary><strong>.NET</strong></summary>
 
 ```csharp
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
+using GitHub.Copilot.Rpc;
 
 await using var client = new CopilotClient();
 await using var session = await client.CreateSessionAsync(new SessionConfig
@@ -199,7 +201,7 @@ await using var session = await client.CreateSessionAsync(new SessionConfig
         },
     },
     OnPermissionRequest = (req, inv) =>
-        Task.FromResult(new PermissionRequestResult { Kind = PermissionRequestResultKind.Approved }),
+        Task.FromResult(PermissionDecision.ApproveOnce()),
 });
 ```
 
@@ -431,6 +433,7 @@ import (
 	"context"
 	"fmt"
 	copilot "github.com/github/copilot-sdk/go"
+	"github.com/github/copilot-sdk/go/rpc"
 )
 
 func main() {
@@ -440,23 +443,23 @@ func main() {
 
 	session, _ := client.CreateSession(ctx, &copilot.SessionConfig{
 		Model: "gpt-4.1",
-		OnPermissionRequest: func(req copilot.PermissionRequest, inv copilot.PermissionInvocation) (copilot.PermissionRequestResult, error) {
-			return copilot.PermissionRequestResult{Kind: copilot.PermissionRequestResultKindApproved}, nil
+		OnPermissionRequest: func(req copilot.PermissionRequest, inv copilot.PermissionInvocation) (rpc.PermissionDecision, error) {
+			return &rpc.PermissionDecisionApproveOnce{}, nil
 		},
 	})
 
 	session.On(func(event copilot.SessionEvent) {
-		switch event.Type {
-		case "subagent.started":
-			fmt.Printf("▶ 子代理已開始：%s\n", *event.Data.AgentDisplayName)
-			fmt.Printf("  說明：%s\n", *event.Data.AgentDescription)
-			fmt.Printf("  工具呼叫識別碼 (Tool call ID)：%s\n", *event.Data.ToolCallID)
-		case "subagent.completed":
-			fmt.Printf("✅ 子代理已完成：%s\n", *event.Data.AgentDisplayName)
-		case "subagent.failed":
-			fmt.Printf("❌ 子代理失敗：%s — %v\n", *event.Data.AgentDisplayName, event.Data.Error)
-		case "subagent.selected":
-			fmt.Printf("🎯 已選擇代理：%s\n", *event.Data.AgentDisplayName)
+		switch d := event.Data.(type) {
+		case *copilot.SubagentStartedData:
+			fmt.Printf("▶ 子代理已開始：%s\n", d.AgentDisplayName)
+			fmt.Printf("  說明：%s\n", d.AgentDescription)
+			fmt.Printf("  工具呼叫識別碼 (Tool call ID)：%s\n", d.ToolCallID)
+		case *copilot.SubagentCompletedData:
+			fmt.Printf("✅ 子代理已完成：%s\n", d.AgentDisplayName)
+		case *copilot.SubagentFailedData:
+			fmt.Printf("❌ 子代理失敗：%s — %v\n", d.AgentDisplayName, d.Error)
+		case *copilot.SubagentSelectedData:
+			fmt.Printf("🎯 已選擇代理：%s\n", d.AgentDisplayName)
 		}
 	})
 
@@ -470,17 +473,17 @@ func main() {
 
 ```go
 session.On(func(event copilot.SessionEvent) {
-    switch event.Type {
-    case "subagent.started":
-        fmt.Printf("▶ 子代理已開始：%s\n", *event.Data.AgentDisplayName)
-        fmt.Printf("  說明：%s\n", *event.Data.AgentDescription)
-        fmt.Printf("  工具呼叫識別碼 (Tool call ID)：%s\n", *event.Data.ToolCallID)
-    case "subagent.completed":
-        fmt.Printf("✅ 子代理已完成：%s\n", *event.Data.AgentDisplayName)
-    case "subagent.failed":
-        fmt.Printf("❌ 子代理失敗：%s — %v\n", *event.Data.AgentDisplayName, event.Data.Error)
-    case "subagent.selected":
-        fmt.Printf("🎯 已選擇代理：%s\n", *event.Data.AgentDisplayName)
+    switch d := event.Data.(type) {
+    case *copilot.SubagentStartedData:
+        fmt.Printf("▶ 子代理已開始：%s\n", d.AgentDisplayName)
+        fmt.Printf("  說明：%s\n", d.AgentDescription)
+        fmt.Printf("  工具呼叫識別碼 (Tool call ID)：%s\n", d.ToolCallID)
+    case *copilot.SubagentCompletedData:
+        fmt.Printf("✅ 子代理已完成：%s\n", d.AgentDisplayName)
+    case *copilot.SubagentFailedData:
+        fmt.Printf("❌ 子代理失敗：%s — %v\n", d.AgentDisplayName, d.Error)
+    case *copilot.SubagentSelectedData:
+        fmt.Printf("🎯 已選擇代理：%s\n", d.AgentDisplayName)
     }
 })
 
@@ -496,13 +499,15 @@ _, err := session.SendAndWait(ctx, copilot.MessageOptions{
 
 <!-- docs-validate: hidden -->
 ```csharp
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
+
+namespace CopilotSdkDocs.ZhTW;
 
 public static class SubAgentEventsExample
 {
     public static async Task Example(CopilotSession session)
     {
-        using var subscription = session.On(evt =>
+        using var subscription = session.On<SessionEvent>(evt =>
         {
             switch (evt)
             {
@@ -533,7 +538,7 @@ public static class SubAgentEventsExample
 <!-- /docs-validate: hidden -->
 
 ```csharp
-using var subscription = session.On(evt =>
+using var subscription = session.On<SessionEvent>(evt =>
 {
     switch (evt)
     {

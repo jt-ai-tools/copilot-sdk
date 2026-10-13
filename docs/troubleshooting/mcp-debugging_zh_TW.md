@@ -244,28 +244,28 @@ cd /expected/working/dir
 
 <!-- docs-validate: hidden -->
 ```csharp
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
+
+namespace CopilotSdkDocs.ZhTW;
 
 public static class McpDotnetConfigExample
 {
     public static void Main()
     {
-        var servers = new Dictionary<string, McpLocalServerConfig>
+        var servers = new Dictionary<string, McpServerConfig>
         {
-            ["my-dotnet-server"] = new McpLocalServerConfig
+            ["my-dotnet-server"] = new McpStdioServerConfig
             {
-                Type = "local",
                 Command = @"C:\Tools\MyServer\MyServer.exe",
                 Args = new List<string>(),
-                Cwd = @"C:\Tools\MyServer",
+                WorkingDirectory = @"C:\Tools\MyServer",
                 Tools = new List<string> { "*" },
             },
-            ["my-dotnet-tool"] = new McpLocalServerConfig
+            ["my-dotnet-tool"] = new McpStdioServerConfig
             {
-                Type = "local",
                 Command = "dotnet",
                 Args = new List<string> { @"C:\Tools\MyTool\MyTool.dll" },
-                Cwd = @"C:\Tools\MyTool",
+                WorkingDirectory = @"C:\Tools\MyTool",
                 Tools = new List<string> { "*" },
             }
         };
@@ -275,22 +275,20 @@ public static class McpDotnetConfigExample
 <!-- /docs-validate: hidden -->
 ```csharp
 // .NET exe 的正確設定
-["my-dotnet-server"] = new McpLocalServerConfig
+["my-dotnet-server"] = new McpStdioServerConfig
 {
-    Type = "local",
     Command = @"C:\Tools\MyServer\MyServer.exe",  // 帶有 .exe 的完整路徑
     Args = new List<string>(),
-    Cwd = @"C:\Tools\MyServer",  // 設定工作目錄
+    WorkingDirectory = @"C:\Tools\MyServer",  // 設定工作目錄
     Tools = new List<string> { "*" },
 }
 
 // 適用於 dotnet 工具 (DLL)
-["my-dotnet-tool"] = new McpLocalServerConfig
+["my-dotnet-tool"] = new McpStdioServerConfig
 {
-    Type = "local", 
     Command = "dotnet",
     Args = new List<string> { @"C:\Tools\MyTool\MyTool.dll" },
-    Cwd = @"C:\Tools\MyTool",
+    WorkingDirectory = @"C:\Tools\MyTool",
     Tools = new List<string> { "*" },
 }
 ```
@@ -299,17 +297,18 @@ public static class McpDotnetConfigExample
 
 <!-- docs-validate: hidden -->
 ```csharp
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
+
+namespace CopilotSdkDocs.ZhTW;
 
 public static class McpNpxConfigExample
 {
     public static void Main()
     {
-        var servers = new Dictionary<string, McpLocalServerConfig>
+        var servers = new Dictionary<string, McpServerConfig>
         {
-            ["filesystem"] = new McpLocalServerConfig
+            ["filesystem"] = new McpStdioServerConfig
             {
-                Type = "local",
                 Command = "cmd",
                 Args = new List<string> { "/c", "npx", "-y", "@modelcontextprotocol/server-filesystem", "C:\\allowed\\path" },
                 Tools = new List<string> { "*" },
@@ -321,9 +320,8 @@ public static class McpNpxConfigExample
 <!-- /docs-validate: hidden -->
 ```csharp
 // Windows 需要 cmd /c 才能執行 npx
-["filesystem"] = new McpLocalServerConfig
+["filesystem"] = new McpStdioServerConfig
 {
-    Type = "local",
     Command = "cmd",
     Args = new List<string> { "/c", "npx", "-y", "@modelcontextprotocol/server-filesystem", "C:\\allowed\\path" },
     Tools = new List<string> { "*" },

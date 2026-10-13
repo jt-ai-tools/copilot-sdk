@@ -75,7 +75,7 @@ client := copilot.NewClient(&copilot.ClientOptions{
 <!-- docs-validate: skip -->
 
 ```csharp
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
 using Microsoft.Extensions.Logging;
 
 // 使用 ILogger
@@ -87,7 +87,7 @@ var loggerFactory = LoggerFactory.Create(builder =>
 
 var client = new CopilotClient(new CopilotClientOptions
 {
-    LogLevel = "debug",
+    LogLevel = CopilotLogLevel.Debug,
     Logger = loggerFactory.CreateLogger<CopilotClient>()
 });
 ```
@@ -150,7 +150,7 @@ func main() {
 ```csharp
 var client = new CopilotClient(new CopilotClientOptions
 {
-    CliArgs = new[] { "--log-dir", "/path/to/logs" }
+    Connection = RuntimeConnection.ForStdio(args: new[] { "--log-dir", "/path/to/logs" })
 });
 ```
 
@@ -209,7 +209,7 @@ var client = new CopilotClient(new CopilotClientOptions
    ```csharp
    var client = new CopilotClient(new CopilotClientOptions
    {
-       CliPath = "/usr/local/bin/copilot"
+       Connection = RuntimeConnection.ForStdio("/usr/local/bin/copilot")
    });
    ```
    </details>
@@ -262,7 +262,7 @@ var client = new CopilotClient(new CopilotClientOptions
    ```csharp
    var client = new CopilotClient(new CopilotClientOptions
    {
-       GithubToken = Environment.GetEnvironmentVariable("GITHUB_TOKEN")
+       GitHubToken = Environment.GetEnvironmentVariable("GITHUB_TOKEN")
    });
    ```
    </details>
@@ -457,9 +457,9 @@ session.on("error", (event) => {
 
 1. **路徑分隔符：** 使用原始字串或正斜線：
    ```csharp
-   CliPath = @"C:\Program Files\GitHub\copilot.exe"
+   Connection = RuntimeConnection.ForStdio(@"C:\Program Files\GitHub\copilot.exe")
    // 或
-   CliPath = "C:/Program Files/GitHub/copilot.exe"
+   Connection = RuntimeConnection.ForStdio("C:/Program Files/GitHub/copilot.exe")
    ```
 
 2. **PATHEXT 解析：** SDK 會自動處理，但若問題持續：

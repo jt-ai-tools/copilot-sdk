@@ -98,6 +98,7 @@ package main
 import (
 	"context"
 	copilot "github.com/github/copilot-sdk/go"
+	"github.com/github/copilot-sdk/go/rpc"
 )
 
 func main() {
@@ -107,8 +108,8 @@ func main() {
 
 	session, _ := client.CreateSession(ctx, &copilot.SessionConfig{
 		Model: "gpt-4.1",
-		OnPermissionRequest: func(req copilot.PermissionRequest, inv copilot.PermissionInvocation) (copilot.PermissionRequestResult, error) {
-			return copilot.PermissionRequestResult{Kind: copilot.PermissionRequestResultKindApproved}, nil
+		OnPermissionRequest: func(req copilot.PermissionRequest, inv copilot.PermissionInvocation) (rpc.PermissionDecision, error) {
+			return &rpc.PermissionDecisionApproveOnce{}, nil
 		},
 	})
 
@@ -116,9 +117,8 @@ func main() {
 	session.Send(ctx, copilot.MessageOptions{
 		Prompt: "描述你在這張圖片中看到了什麼",
 		Attachments: []copilot.Attachment{
-			{
-				Type: copilot.File,
-				Path: &path,
+			&copilot.AttachmentFile{
+				Path: path,
 			},
 		},
 	})
@@ -133,8 +133,8 @@ client.Start(ctx)
 
 session, _ := client.CreateSession(ctx, &copilot.SessionConfig{
     Model: "gpt-4.1",
-    OnPermissionRequest: func(req copilot.PermissionRequest, inv copilot.PermissionInvocation) (copilot.PermissionRequestResult, error) {
-        return copilot.PermissionRequestResult{Kind: copilot.PermissionRequestResultKindApproved}, nil
+    OnPermissionRequest: func(req copilot.PermissionRequest, inv copilot.PermissionInvocation) (rpc.PermissionDecision, error) {
+        return &rpc.PermissionDecisionApproveOnce{}, nil
     },
 })
 
@@ -142,9 +142,8 @@ path := "/absolute/path/to/screenshot.png"
 session.Send(ctx, copilot.MessageOptions{
     Prompt: "描述你在這張圖片中看到了什麼",
     Attachments: []copilot.Attachment{
-        {
-            Type: copilot.File,
-            Path: &path,
+        &copilot.AttachmentFile{
+            Path: path,
         },
     },
 })
@@ -157,7 +156,10 @@ session.Send(ctx, copilot.MessageOptions{
 
 <!-- docs-validate: hidden -->
 ```csharp
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
+using GitHub.Copilot.Rpc;
+
+namespace CopilotSdkDocs.ZhTW;
 
 public static class ImageInputExample
 {
@@ -168,15 +170,15 @@ public static class ImageInputExample
         {
             Model = "gpt-4.1",
             OnPermissionRequest = (req, inv) =>
-                Task.FromResult(new PermissionRequestResult { Kind = PermissionRequestResultKind.Approved }),
+                Task.FromResult(PermissionDecision.ApproveOnce()),
         });
 
         await session.SendAsync(new MessageOptions
         {
             Prompt = "描述你在這張圖片中看到了什麼",
-            Attachments = new List<UserMessageDataAttachmentsItem>
+            Attachments = new List<Attachment>
             {
-                new UserMessageDataAttachmentsItemFile
+                new AttachmentFile
                 {
                     Path = "/absolute/path/to/screenshot.png",
                     DisplayName = "screenshot.png",
@@ -189,22 +191,23 @@ public static class ImageInputExample
 <!-- /docs-validate: hidden -->
 
 ```csharp
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
+using GitHub.Copilot.Rpc;
 
 await using var client = new CopilotClient();
 await using var session = await client.CreateSessionAsync(new SessionConfig
 {
     Model = "gpt-4.1",
     OnPermissionRequest = (req, inv) =>
-        Task.FromResult(new PermissionRequestResult { Kind = PermissionRequestResultKind.Approved }),
+        Task.FromResult(PermissionDecision.ApproveOnce()),
 });
 
 await session.SendAsync(new MessageOptions
 {
     Prompt = "描述你在這張圖片中看到了什麼",
-    Attachments = new List<UserMessageDataAttachmentsItem>
+    Attachments = new List<Attachment>
     {
-        new UserMessageDataAttachmentsItemFile
+        new AttachmentFile
         {
             Path = "/absolute/path/to/screenshot.png",
             DisplayName = "screenshot.png",

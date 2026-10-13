@@ -232,12 +232,12 @@ response, _ := session.SendAndWait(ctx, copilot.MessageOptions{Prompt: "你好�
 
 <!-- docs-validate: hidden -->
 ```csharp
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
 
 CopilotClient CreateClientForUser(string userToken) =>
     new CopilotClient(new CopilotClientOptions
     {
-        GithubToken = userToken,
+        GitHubToken = userToken,
         UseLoggedInUser = false,
     });
 
@@ -259,7 +259,7 @@ var response = await session.SendAndWaitAsync(
 CopilotClient CreateClientForUser(string userToken) =>
     new CopilotClient(new CopilotClientOptions
     {
-        GithubToken = userToken,
+        GitHubToken = userToken,
         UseLoggedInUser = false,
     });
 

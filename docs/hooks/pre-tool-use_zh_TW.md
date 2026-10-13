@@ -84,7 +84,9 @@ type PreToolUseHandler func(
 
 <!-- docs-validate: hidden -->
 ```csharp
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
+
+namespace CopilotSdkDocs.ZhTW;
 
 public delegate Task<PreToolUseHookOutput?> PreToolUseHandler(
     PreToolUseHookInput input,
@@ -217,7 +219,9 @@ session, _ := client.CreateSession(context.Background(), &copilot.SessionConfig{
 
 <!-- docs-validate: hidden -->
 ```csharp
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
+
+namespace CopilotSdkDocs.ZhTW;
 
 public static class PreToolUseExample
 {

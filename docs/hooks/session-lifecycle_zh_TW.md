@@ -88,7 +88,9 @@ type SessionStartHandler func(
 
 <!-- docs-validate: hidden -->
 ```csharp
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
+
+namespace CopilotSdkDocs.ZhTW;
 
 public delegate Task<SessionStartHookOutput?> SessionStartHandler(
     SessionStartHookInput input,
@@ -297,6 +299,10 @@ type SessionEndHandler func(
 <summary><strong>.NET</strong></summary>
 
 ```csharp
+using GitHub.Copilot;
+
+namespace CopilotSdkDocs.ZhTW;
+
 public delegate Task<SessionEndHookOutput?> SessionEndHandler(
     SessionEndHookInput input,
     HookInvocation invocation);

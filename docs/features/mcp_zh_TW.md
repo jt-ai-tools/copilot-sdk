@@ -117,15 +117,14 @@ func main() {
     }
     defer client.Stop()
 
-    // MCPServerConfig 是一個 map[string]any，具有靈活性
+    // MCPServerConfig 使用具型別的設定；本例使用 MCPStdioServerConfig
     session, err := client.CreateSession(ctx, &copilot.SessionConfig{
         Model: "gpt-5",
         MCPServers: map[string]copilot.MCPServerConfig{
-            "my-local-server": {
-                "type":    "local",
-                "command": "node",
-                "args":    []string{"./mcp-server.js"},
-                "tools":   []string{"*"},
+            "my-local-server": copilot.MCPStdioServerConfig{
+                Command: "node",
+                Args: []string{"./mcp-server.js"},
+                Tools: []string{"*"},
             },
         },
     })
@@ -141,17 +140,16 @@ func main() {
 ### .NET
 
 ```csharp
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
 
 await using var client = new CopilotClient();
 await using var session = await client.CreateSessionAsync(new SessionConfig
 {
     Model = "gpt-5",
-    McpServers = new Dictionary<string, object>
+    McpServers = new Dictionary<string, McpServerConfig>
     {
-        ["my-local-server"] = new McpLocalServerConfig
+        ["my-local-server"] = new McpStdioServerConfig
         {
-            Type = "local",
             Command = "node",
             Args = new List<string> { "./mcp-server.js" },
             Tools = new List<string> { "*" },

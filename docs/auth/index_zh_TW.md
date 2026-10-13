@@ -50,6 +50,20 @@ await client.start()
 <details>
 <summary><strong>Go</strong></summary>
 
+<!-- docs-validate: hidden -->
+```go
+package main
+
+import copilot "github.com/github/copilot-sdk/go"
+
+func main() {
+	// 預設：使用已登入用戶的憑據
+	client := copilot.NewClient(nil)
+	_ = client
+}
+```
+<!-- /docs-validate: hidden -->
+
 ```go
 import copilot "github.com/github/copilot-sdk/go"
 
@@ -63,7 +77,7 @@ client := copilot.NewClient(nil)
 <summary><strong>.NET</strong></summary>
 
 ```csharp
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
 
 // 預設：使用已登入用戶的憑據
 await using var client = new CopilotClient();
@@ -119,11 +133,28 @@ await client.start()
 <details>
 <summary><strong>Go</strong></summary>
 
+<!-- docs-validate: hidden -->
+```go
+package main
+
+import copilot "github.com/github/copilot-sdk/go"
+
+func main() {
+	userAccessToken := "token"
+	client := copilot.NewClient(&copilot.ClientOptions{
+		GitHubToken:     userAccessToken,
+		UseLoggedInUser: copilot.Bool(false),
+	})
+	_ = client
+}
+```
+<!-- /docs-validate: hidden -->
+
 ```go
 import copilot "github.com/github/copilot-sdk/go"
 
 client := copilot.NewClient(&copilot.ClientOptions{
-    GithubToken:     userAccessToken,   // 來自 OAuth 流程的令牌
+    GitHubToken:     userAccessToken,   // 來自 OAuth 流程的令牌
     UseLoggedInUser: copilot.Bool(false), // 不使用存儲的 CLI 憑據
 })
 ```
@@ -133,12 +164,25 @@ client := copilot.NewClient(&copilot.ClientOptions{
 <details>
 <summary><strong>.NET</strong></summary>
 
+<!-- docs-validate: hidden -->
 ```csharp
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
+
+var userAccessToken = "token";
+await using var client = new CopilotClient(new CopilotClientOptions
+{
+    GitHubToken = userAccessToken,     // 來自 OAuth 流程的令牌
+    UseLoggedInUser = false,           // 不使用存儲的 CLI 憑據
+});
+```
+<!-- /docs-validate: hidden -->
+
+```csharp
+using GitHub.Copilot;
 
 await using var client = new CopilotClient(new CopilotClientOptions
 {
-    GithubToken = userAccessToken,     // 來自 OAuth 流程的令牌
+    GitHubToken = userAccessToken,     // 來自 OAuth 流程的令牌
     UseLoggedInUser = false,           // 不使用存儲的 CLI 憑據
 });
 ```
@@ -262,9 +306,24 @@ client = CopilotClient({
 <details>
 <summary><strong>Go</strong></summary>
 
+<!-- docs-validate: hidden -->
+```go
+package main
+
+import copilot "github.com/github/copilot-sdk/go"
+
+func main() {
+	client := copilot.NewClient(&copilot.ClientOptions{
+		UseLoggedInUser: copilot.Bool(false),
+	})
+	_ = client
+}
+```
+<!-- /docs-validate: hidden -->
+
 ```go
 client := copilot.NewClient(&copilot.ClientOptions{
-    UseLoggedInUser: copilot.Bool(false),  // 僅使用明確提供的令牌
+    UseLoggedInUser: copilot.Bool(false),  // 使用明確提供或環境變數中的令牌，不讀取已登入用戶憑據
 })
 ```
 

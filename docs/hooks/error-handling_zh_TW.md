@@ -84,7 +84,9 @@ type ErrorOccurredHandler func(
 
 <!-- docs-validate: hidden -->
 ```csharp
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
+
+namespace CopilotSdkDocs.ZhTW;
 
 public delegate Task<ErrorOccurredHookOutput?> ErrorOccurredHandler(
     ErrorOccurredHookInput input,
@@ -209,7 +211,9 @@ session, _ := client.CreateSession(context.Background(), &copilot.SessionConfig{
 
 <!-- docs-validate: hidden -->
 ```csharp
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
+
+namespace CopilotSdkDocs.ZhTW;
 
 public static class ErrorHandlingExample
 {

@@ -188,7 +188,11 @@ func main() {
 		log.Fatal(err)
 	}
 
-	fmt.Println(*response.Data.Content)
+	if response != nil {
+		if d, ok := response.Data.(*copilot.AssistantMessageData); ok {
+			fmt.Println(d.Content)
+		}
+	}
 	os.Exit(0)
 }
 ```
@@ -207,7 +211,7 @@ go run main.go
 建立一個新的主控台專案並將以下代碼添加到 `Program.cs`：
 
 ```csharp
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
 
 await using var client = new CopilotClient();
 await using var session = await client.CreateSessionAsync(new SessionConfig { Model = "gpt-4.1" });
@@ -332,7 +336,7 @@ func main() {
 
 	session, err := client.CreateSession(ctx, &copilot.SessionConfig{
 		Model:     "gpt-4.1",
-		Streaming: true,
+		Streaming: copilot.Bool(true),
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -340,10 +344,10 @@ func main() {
 
 	// 監聽響應區塊
 	session.On(func(event copilot.SessionEvent) {
-		if event.Type == "assistant.message_delta" {
-			fmt.Print(*event.Data.DeltaContent)
+		if d, ok := event.Data.(*copilot.AssistantMessageDeltaData); ok {
+			fmt.Print(d.DeltaContent)
 		}
-		if event.Type == "session.idle" {
+		if _, ok := event.Data.(*copilot.SessionIdleData); ok {
 			fmt.Println()
 		}
 	})
@@ -364,7 +368,7 @@ func main() {
 更新 `Program.cs`：
 
 ```csharp
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
 
 await using var client = new CopilotClient();
 await using var session = await client.CreateSessionAsync(new SessionConfig
@@ -374,7 +378,7 @@ await using var session = await client.CreateSessionAsync(new SessionConfig
 });
 
 // 監聽響應區塊
-session.On(ev =>
+session.On<SessionEvent>(ev =>
 {
     if (ev is AssistantMessageDeltaEvent deltaEvent)
     {
@@ -448,18 +452,50 @@ unsubscribe()
 <details>
 <summary><strong>Go</strong></summary>
 
+<!-- docs-validate: hidden -->
+```go
+package main
+
+import (
+	"fmt"
+	copilot "github.com/github/copilot-sdk/go"
+)
+
+func main() {
+	session := &copilot.Session{}
+	
+	// 訂閱所有事件
+	unsubscribe := session.On(func(event copilot.SessionEvent) {
+	    fmt.Println("事件：", event.Type())
+	})
+	
+	// 在處理器中過濾事件類型
+	session.On(func(event copilot.SessionEvent) {
+	    if _, ok := event.Data.(*copilot.SessionIdleData); ok {
+	        fmt.Println("會話已閒置")
+	    } else if d, ok := event.Data.(*copilot.AssistantMessageData); ok {
+	        fmt.Println("訊息：", d.Content)
+	    }
+	})
+	
+	// 之後取消訂閱：
+	unsubscribe()
+}
+```
+<!-- /docs-validate: hidden -->
+
 ```go
 // 訂閱所有事件
 unsubscribe := session.On(func(event copilot.SessionEvent) {
-    fmt.Println("事件：", event.Type)
+    fmt.Println("事件：", event.Type())
 })
 
 // 在處理器中過濾事件類型
 session.On(func(event copilot.SessionEvent) {
-    if event.Type == "session.idle" {
+    if _, ok := event.Data.(*copilot.SessionIdleData); ok {
         fmt.Println("會話已閒置")
-    } else if event.Type == "assistant.message" {
-        fmt.Println("訊息：", *event.Data.Content)
+    } else if d, ok := event.Data.(*copilot.AssistantMessageData); ok {
+        fmt.Println("訊息：", d.Content)
     }
 })
 
@@ -472,12 +508,46 @@ unsubscribe()
 <details>
 <summary><strong>.NET</strong></summary>
 
+<!-- docs-validate: hidden -->
+```csharp
+using GitHub.Copilot;
+
+namespace CopilotSdkDocs.ZhTW;
+
+public static class EventSubscriptionExample
+{
+    public static void Example(CopilotSession session)
+    {
+        // 訂閱所有事件
+        var unsubscribe = session.On<SessionEvent>(ev => Console.WriteLine($"事件：{ev.Type}"));
+
+        // 使用模式比對過濾事件類型
+        session.On<SessionEvent>(ev =>
+        {
+            switch (ev)
+            {
+                case SessionIdleEvent:
+                    Console.WriteLine("會話已閒置");
+                    break;
+                case AssistantMessageEvent msg:
+                    Console.WriteLine($"訊息：{msg.Data.Content}");
+                    break;
+            }
+        });
+
+        // 之後取消訂閱：
+        unsubscribe.Dispose();
+    }
+}
+```
+<!-- /docs-validate: hidden -->
+
 ```csharp
 // 訂閱所有事件
-var unsubscribe = session.On(ev => Console.WriteLine($"事件：{ev.Type}"));
+var unsubscribe = session.On<SessionEvent>(ev => Console.WriteLine($"事件：{ev.Type}"));
 
 // 使用模式比對過濾事件類型
-session.On(ev =>
+session.On<SessionEvent>(ev =>
 {
     switch (ev)
     {
@@ -669,7 +739,7 @@ func main() {
 
 	session, err := client.CreateSession(ctx, &copilot.SessionConfig{
 		Model:     "gpt-4.1",
-		Streaming: true,
+		Streaming: copilot.Bool(true),
 		Tools:     []copilot.Tool{getWeather},
 	})
 	if err != nil {
@@ -677,10 +747,10 @@ func main() {
 	}
 
 	session.On(func(event copilot.SessionEvent) {
-		if event.Type == "assistant.message_delta" {
-			fmt.Print(*event.Data.DeltaContent)
+		if d, ok := event.Data.(*copilot.AssistantMessageDeltaData); ok {
+			fmt.Print(d.DeltaContent)
 		}
-		if event.Type == "session.idle" {
+		if _, ok := event.Data.(*copilot.SessionIdleData); ok {
 			fmt.Println()
 		}
 	})
@@ -703,14 +773,14 @@ func main() {
 更新 `Program.cs`：
 
 ```csharp
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
 using Microsoft.Extensions.AI;
 using System.ComponentModel;
 
 await using var client = new CopilotClient();
 
 // 定義一個 Copilot 可以調用的工具
-var getWeather = AIFunctionFactory.Create(
+var getWeather = CopilotTool.DefineTool(
     ([Description("城市名稱")] string city) =>
     {
         // 在實際應用中，您會在這裡調用天氣 API
@@ -719,9 +789,11 @@ var getWeather = AIFunctionFactory.Create(
         var condition = conditions[Random.Shared.Next(conditions.Length)];
         return new { city, temperature = $"{temp}°F", condition };
     },
-    "get_weather",
-    "獲取城市的當前天氣"
-);
+    factoryOptions: new AIFunctionFactoryOptions
+    {
+        Name = "get_weather",
+        Description = "獲取城市的當前天氣",
+    });
 
 await using var session = await client.CreateSessionAsync(new SessionConfig
 {
@@ -730,7 +802,7 @@ await using var session = await client.CreateSessionAsync(new SessionConfig
     Tools = [getWeather],
 });
 
-session.On(ev =>
+session.On<SessionEvent>(ev =>
 {
     if (ev is AssistantMessageDeltaEvent deltaEvent)
     {
@@ -952,7 +1024,7 @@ func main() {
 
 	session, err := client.CreateSession(ctx, &copilot.SessionConfig{
 		Model:     "gpt-4.1",
-		Streaming: true,
+		Streaming: copilot.Bool(true),
 		Tools:     []copilot.Tool{getWeather},
 	})
 	if err != nil {
@@ -960,12 +1032,12 @@ func main() {
 	}
 
 	session.On(func(event copilot.SessionEvent) {
-		if event.Type == "assistant.message_delta" {
-			if event.Data.DeltaContent != nil {
-				fmt.Print(*event.Data.DeltaContent)
+		if d, ok := event.Data.(*copilot.AssistantMessageDeltaData); ok {
+			if d.DeltaContent != "" {
+				fmt.Print(d.DeltaContent)
 			}
 		}
-		if event.Type == "session.idle" {
+		if _, ok := event.Data.(*copilot.SessionIdleData); ok {
 			fmt.Println()
 		}
 	})
@@ -1012,12 +1084,12 @@ go run weather-assistant.go
 建立一個新的主控台專案並更新 `Program.cs`：
 
 ```csharp
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
 using Microsoft.Extensions.AI;
 using System.ComponentModel;
 
-// 使用 AIFunctionFactory 定義天氣工具
-var getWeather = AIFunctionFactory.Create(
+// 使用 CopilotTool 定義天氣工具
+var getWeather = CopilotTool.DefineTool(
     ([Description("城市名稱")] string city) =>
     {
         var conditions = new[] { "晴天", "多雲", "有雨", "局部多雲" };
@@ -1025,8 +1097,11 @@ var getWeather = AIFunctionFactory.Create(
         var condition = conditions[Random.Shared.Next(conditions.Length)];
         return new { city, temperature = $"{temp}°F", condition };
     },
-    "get_weather",
-    "獲取城市的當前天氣");
+    factoryOptions: new AIFunctionFactoryOptions
+    {
+        Name = "get_weather",
+        Description = "獲取城市的當前天氣",
+    });
 
 await using var client = new CopilotClient();
 await using var session = await client.CreateSessionAsync(new SessionConfig
@@ -1037,7 +1112,7 @@ await using var session = await client.CreateSessionAsync(new SessionConfig
 });
 
 // 監聽響應區塊
-session.On(ev =>
+session.On<SessionEvent>(ev =>
 {
     if (ev is AssistantMessageDeltaEvent deltaEvent)
     {
@@ -1226,11 +1301,43 @@ session = await client.create_session({"on_permission_request": PermissionHandle
 <details>
 <summary><strong>Go</strong></summary>
 
+<!-- docs-validate: hidden -->
+```go
+package main
+
+import (
+	"context"
+	"log"
+	copilot "github.com/github/copilot-sdk/go"
+)
+
+func main() {
+	ctx := context.Background()
+	
+	client := copilot.NewClient(&copilot.ClientOptions{
+	    Connection: copilot.URIConnection{URL: "localhost:4321"},
+	})
+	
+	if err := client.Start(ctx); err != nil {
+	    log.Fatal(err)
+	}
+	defer client.Stop()
+	
+	// 像往常一樣使用用戶端
+	session, err := client.CreateSession(ctx, &copilot.SessionConfig{
+	    OnPermissionRequest: copilot.PermissionHandler.ApproveAll,
+	})
+	_ = session
+	_ = err
+}
+```
+<!-- /docs-validate: hidden -->
+
 ```go
 import copilot "github.com/github/copilot-sdk/go"
 
 client := copilot.NewClient(&copilot.ClientOptions{
-    CLIUrl: "localhost:4321",
+    Connection: copilot.URIConnection{URL: "localhost:4321"},
 })
 
 if err := client.Start(ctx); err != nil {
@@ -1251,12 +1358,11 @@ session, err := client.CreateSession(ctx, &copilot.SessionConfig{
 <summary><strong>.NET</strong></summary>
 
 ```csharp
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
 
 using var client = new CopilotClient(new CopilotClientOptions
 {
-    CliUrl = "localhost:4321",
-    UseStdio = false
+    Connection = RuntimeConnection.ForUri("localhost:4321"),
 });
 
 // 像往常一樣使用用戶端
@@ -1269,7 +1375,7 @@ await using var session = await client.CreateSessionAsync(new()
 
 </details>
 
-**注意：** 當提供 `cli_url` / `cliUrl` / `CLIUrl` 時，SDK 不會產生或管理 CLI 進程 — 它只會連接到指定 URL 的現有伺服器。
+**注意：** 當提供 `cli_url` / `cliUrl`（Go：`Connection: copilot.URIConnection{URL: ...}`） 時，SDK 不會產生或管理 CLI 進程 — 它只會連接到指定 URL 的現有伺服器。
 
 ---
 

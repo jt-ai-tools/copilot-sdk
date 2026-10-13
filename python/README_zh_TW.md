@@ -27,6 +27,7 @@ python chat.py
 import asyncio
 from copilot import CopilotClient
 
+
 async def main():
     # 建立並啟動用戶端
     client = CopilotClient()
@@ -54,6 +55,7 @@ async def main():
     await session.disconnect()
     await client.stop()
 
+
 asyncio.run(main())
 ```
 
@@ -79,19 +81,23 @@ async with await client.create_session({"model": "gpt-5"}) as session:
 ### CopilotClient
 
 ```python
-client = CopilotClient({
-    "cli_path": "copilot",  # 選用：CLI 執行檔路徑
-    "cli_url": None,        # 選用：現有伺服器的 URL (例如 "localhost:8080")
-    "log_level": "info",    # 選用：記錄層級 (預設："info")
-    "auto_start": True,     # 選用：自動啟動伺服器 (預設：True)
-    "auto_restart": True,   # 選用：當機時自動重新啟動 (預設：True)
-})
+client = CopilotClient(
+    {
+        "cli_path": "copilot",  # 選用：CLI 執行檔路徑
+        "cli_url": None,  # 選用：現有伺服器的 URL (例如 "localhost:8080")
+        "log_level": "info",  # 選用：記錄層級 (預設："info")
+        "auto_start": True,  # 選用：自動啟動伺服器 (預設：True)
+        "auto_restart": True,  # 選用：當機時自動重新啟動 (預設：True)
+    }
+)
 await client.start()
 
 session = await client.create_session({"model": "gpt-5"})
 
+
 def on_event(event):
     print(f"事件：{event['type']}")
+
 
 session.on(on_event)
 await session.send({"prompt": "哈囉！"})
@@ -137,9 +143,11 @@ session_id = await client.get_foreground_session_id()
 # 請求 TUI 顯示特定工作階段 (僅限 TUI+伺服器模式)
 await client.set_foreground_session_id("session-123")
 
+
 # 訂閱所有生命週期事件
 def on_lifecycle(event):
     print(f"{event.type}: {event.sessionId}")
+
 
 unsubscribe = client.on(on_lifecycle)
 
@@ -165,18 +173,23 @@ unsubscribe()
 from pydantic import BaseModel, Field
 from copilot import CopilotClient, define_tool
 
+
 class LookupIssueParams(BaseModel):
     id: str = Field(description="問題識別碼")
+
 
 @define_tool(description="從我們的追蹤器獲取問題詳細資訊")
 async def lookup_issue(params: LookupIssueParams) -> str:
     issue = await fetch_issue(params.id)
     return issue.summary
 
-session = await client.create_session({
-    "model": "gpt-5",
-    "tools": [lookup_issue],
-})
+
+session = await client.create_session(
+    {
+        "model": "gpt-5",
+        "tools": [lookup_issue],
+    }
+)
 ```
 
 > **注意：** 使用 `from __future__ import annotations` 時，請在模組層級 (而非函式內部) 定義 Pydantic 模型。
@@ -188,6 +201,7 @@ session = await client.create_session({
 ```python
 from copilot import CopilotClient, Tool
 
+
 async def lookup_issue(invocation):
     issue_id = invocation["arguments"]["id"]
     issue = await fetch_issue(issue_id)
@@ -197,23 +211,26 @@ async def lookup_issue(invocation):
         "sessionLog": f"已獲取問題 {issue_id}",
     }
 
-session = await client.create_session({
-    "model": "gpt-5",
-    "tools": [
-        Tool(
-            name="lookup_issue",
-            description="從我們的追蹤器獲取問題詳細資訊",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "id": {"type": "string", "description": "問題識別碼"},
+
+session = await client.create_session(
+    {
+        "model": "gpt-5",
+        "tools": [
+            Tool(
+                name="lookup_issue",
+                description="從我們的追蹤器獲取問題詳細資訊",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "問題識別碼"},
+                    },
+                    "required": ["id"],
                 },
-                "required": ["id"],
-            },
-            handler=lookup_issue,
-        )
-    ],
-})
+                handler=lookup_issue,
+            )
+        ],
+    }
+)
 ```
 
 SDK 會自動處理 `tool.call`，執行您的處理常式 (同步或非同步)，並在工具完成時傳回最終結果。
@@ -237,15 +254,17 @@ async def edit_file(params: EditFileParams) -> str:
 SDK 透過 `attachments` 參數支援影像附件。您可以透過提供影像檔案路徑來附加影像：
 
 ```python
-await session.send({
-    "prompt": "這張影像中是什麼？",
-    "attachments": [
-        {
-            "type": "file",
-            "path": "/path/to/image.jpg",
-        }
-    ]
-})
+await session.send(
+    {
+        "prompt": "這張影像中是什麼？",
+        "attachments": [
+            {
+                "type": "file",
+                "path": "/path/to/image.jpg",
+            }
+        ],
+    }
+)
 ```
 
 支援的影像格式包括 JPG、PNG、GIF 和其他常見影像類型。代理的 `view` 工具也可以直接從檔案系統讀取影像，因此您也可以提出如下問題：
@@ -262,14 +281,12 @@ await session.send({"prompt": "此目錄中最近的 jpg 描繪了什麼？"})
 import asyncio
 from copilot import CopilotClient
 
+
 async def main():
     client = CopilotClient()
     await client.start()
 
-    session = await client.create_session({
-        "model": "gpt-5",
-        "streaming": True
-    })
+    session = await client.create_session({"model": "gpt-5", "streaming": True})
 
     # 使用 asyncio.Event 等待完成
     done = asyncio.Event()
@@ -302,6 +319,7 @@ async def main():
     await session.disconnect()
     await client.stop()
 
+
 asyncio.run(main())
 ```
 
@@ -327,20 +345,24 @@ print(session.workspace_path)
 # => ~/.copilot/session-state/{session_id}/
 
 # 自訂閾值
-session = await client.create_session({
-    "model": "gpt-5",
-    "infinite_sessions": {
-        "enabled": True,
-        "background_compaction_threshold": 0.80,  # 在內容使用率達到 80% 時開始壓縮
-        "buffer_exhaustion_threshold": 0.95,  # 在達到 95% 時封鎖，直到壓縮完成
-    },
-})
+session = await client.create_session(
+    {
+        "model": "gpt-5",
+        "infinite_sessions": {
+            "enabled": True,
+            "background_compaction_threshold": 0.80,  # 在內容使用率達到 80% 時開始壓縮
+            "buffer_exhaustion_threshold": 0.95,  # 在達到 95% 時封鎖，直到壓縮完成
+        },
+    }
+)
 
 # 停用無限工作階段
-session = await client.create_session({
-    "model": "gpt-5",
-    "infinite_sessions": {"enabled": False},
-})
+session = await client.create_session(
+    {
+        "model": "gpt-5",
+        "infinite_sessions": {"enabled": False},
+    }
+)
 ```
 
 啟用時，工作階段會發出壓縮事件：
@@ -364,14 +386,16 @@ SDK 支援自訂的 OpenAI 相容 API 提供者 (BYOK - 自備金鑰)，包括�
 **Ollama 範例：**
 
 ```python
-session = await client.create_session({
-    "model": "deepseek-coder-v2:16b",  # 使用自訂提供者時必填
-    "provider": {
-        "type": "openai",
-        "base_url": "http://localhost:11434/v1",  # Ollama 端點
-        # Ollama 不需要 api_key
-    },
-})
+session = await client.create_session(
+    {
+        "model": "deepseek-coder-v2:16b",  # 使用自訂提供者時必填
+        "provider": {
+            "type": "openai",
+            "base_url": "http://localhost:11434/v1",  # Ollama 端點
+            # Ollama 不需要 api_key
+        },
+    }
+)
 
 await session.send({"prompt": "哈囉！"})
 ```
@@ -381,14 +405,16 @@ await session.send({"prompt": "哈囉！"})
 ```python
 import os
 
-session = await client.create_session({
-    "model": "gpt-4",
-    "provider": {
-        "type": "openai",
-        "base_url": "https://my-api.example.com/v1",
-        "api_key": os.environ["MY_API_KEY"],
-    },
-})
+session = await client.create_session(
+    {
+        "model": "gpt-4",
+        "provider": {
+            "type": "openai",
+            "base_url": "https://my-api.example.com/v1",
+            "api_key": os.environ["MY_API_KEY"],
+        },
+    }
+)
 ```
 
 **Azure OpenAI 範例：**
@@ -396,17 +422,19 @@ session = await client.create_session({
 ```python
 import os
 
-session = await client.create_session({
-    "model": "gpt-4",
-    "provider": {
-        "type": "azure",  # 對於 Azure 端點必須是 "azure"，而不是 "openai"
-        "base_url": "https://my-resource.openai.azure.com",  # 僅為主機，無路徑
-        "api_key": os.environ["AZURE_OPENAI_KEY"],
-        "azure": {
-            "api_version": "2024-10-21",
+session = await client.create_session(
+    {
+        "model": "gpt-4",
+        "provider": {
+            "type": "azure",  # 對於 Azure 端點必須是 "azure"，而不是 "openai"
+            "base_url": "https://my-resource.openai.azure.com",  # 僅為主機，無路徑
+            "api_key": os.environ["AZURE_OPENAI_KEY"],
+            "azure": {
+                "api_version": "2024-10-21",
+            },
         },
-    },
-})
+    }
+)
 ```
 
 > **重要注意事項：**
@@ -434,10 +462,13 @@ async def handle_user_input(request, invocation):
         "wasFreeform": True,  # 回答是否為自由格式 (非來自選項)
     }
 
-session = await client.create_session({
-    "model": "gpt-5",
-    "on_user_input_request": handle_user_input,
-})
+
+session = await client.create_session(
+    {
+        "model": "gpt-5",
+        "on_user_input_request": handle_user_input,
+    }
+)
 ```
 
 ## 工作階段 Hook
@@ -454,11 +485,13 @@ async def on_pre_tool_use(input, invocation):
         "additionalContext": "模型的額外內容",
     }
 
+
 async def on_post_tool_use(input, invocation):
     print(f"工具 {input['toolName']} 已完成")
     return {
         "additionalContext": "執行後筆記",
     }
+
 
 async def on_user_prompt_submitted(input, invocation):
     print(f"使用者提示：{input['prompt']}")
@@ -466,14 +499,17 @@ async def on_user_prompt_submitted(input, invocation):
         "modifiedPrompt": input["prompt"],  # 選擇性地修改提示
     }
 
+
 async def on_session_start(input, invocation):
     print(f"工作階段從 {input['source']} 開始")  # "startup", "resume", "new"
     return {
         "additionalContext": "工作階段初始化內容",
     }
 
+
 async def on_session_end(input, invocation):
     print(f"工作階段結束：{input['reason']}")
+
 
 async def on_error_occurred(input, invocation):
     print(f"在 {input['errorContext']} 中發生錯誤：{input['error']}")
@@ -481,17 +517,20 @@ async def on_error_occurred(input, invocation):
         "errorHandling": "retry",  # "retry", "skip" 或 "abort"
     }
 
-session = await client.create_session({
-    "model": "gpt-5",
-    "hooks": {
-        "on_pre_tool_use": on_pre_tool_use,
-        "on_post_tool_use": on_post_tool_use,
-        "on_user_prompt_submitted": on_user_prompt_submitted,
-        "on_session_start": on_session_start,
-        "on_session_end": on_session_end,
-        "on_error_occurred": on_error_occurred,
-    },
-})
+
+session = await client.create_session(
+    {
+        "model": "gpt-5",
+        "hooks": {
+            "on_pre_tool_use": on_pre_tool_use,
+            "on_post_tool_use": on_post_tool_use,
+            "on_user_prompt_submitted": on_user_prompt_submitted,
+            "on_session_start": on_session_start,
+            "on_session_end": on_session_end,
+            "on_error_occurred": on_error_occurred,
+        },
+    }
+)
 ```
 
 **可用的 Hook：**

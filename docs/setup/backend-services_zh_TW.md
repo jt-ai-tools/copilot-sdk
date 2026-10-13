@@ -148,7 +148,7 @@ func main() {
 	message := "你好"
 
 	client := copilot.NewClient(&copilot.ClientOptions{
-		CLIUrl: "localhost:4321",
+		Connection: copilot.URIConnection{URL: "localhost:4321"},
 	})
 	client.Start(ctx)
 	defer client.Stop()
@@ -166,7 +166,7 @@ func main() {
 
 ```go
 client := copilot.NewClient(&copilot.ClientOptions{
-    CLIUrl:"localhost:4321",
+    Connection: copilot.URIConnection{URL: "localhost:4321"},
 })
 client.Start(ctx)
 defer client.Stop()
@@ -186,15 +186,14 @@ response, _ := session.SendAndWait(ctx, copilot.MessageOptions{Prompt: message})
 
 <!-- docs-validate: hidden -->
 ```csharp
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
 
 var userId = "user1";
 var message = "你好";
 
 var client = new CopilotClient(new CopilotClientOptions
 {
-    CliUrl = "localhost:4321",
-    UseStdio = false,
+    Connection = RuntimeConnection.ForUri("localhost:4321"),
 });
 
 await using var session = await client.CreateSessionAsync(new SessionConfig
@@ -211,8 +210,7 @@ var response = await session.SendAndWaitAsync(
 ```csharp
 var client = new CopilotClient(new CopilotClientOptions
 {
-    CliUrl = "localhost:4321",
-    UseStdio = false,
+    Connection = RuntimeConnection.ForUri("localhost:4321"),
 });
 
 await using var session = await client.CreateSessionAsync(new SessionConfig

@@ -72,6 +72,7 @@ package main
 import (
 	"context"
 	copilot "github.com/github/copilot-sdk/go"
+	"github.com/github/copilot-sdk/go/rpc"
 )
 
 func main() {
@@ -81,8 +82,8 @@ func main() {
 	session, _ := client.CreateSession(ctx, &copilot.SessionConfig{
 		SessionID: "user-123-task-456",
 		Model:     "gpt-5.2-codex",
-		OnPermissionRequest: func(req copilot.PermissionRequest, inv copilot.PermissionInvocation) (copilot.PermissionRequestResult, error) {
-			return copilot.PermissionRequestResult{Kind: copilot.PermissionRequestResultKindApproved}, nil
+		OnPermissionRequest: func(req copilot.PermissionRequest, inv copilot.PermissionInvocation) (rpc.PermissionDecision, error) {
+			return &rpc.PermissionDecisionApproveOnce{}, nil
 		},
 	})
 
@@ -111,7 +112,7 @@ session.SendAndWait(ctx, copilot.MessageOptions{Prompt: "分析我的程式碼�
 ### C# (.NET)
 
 ```csharp
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
 
 var client = new CopilotClient();
 
@@ -203,7 +204,9 @@ session.SendAndWait(ctx, copilot.MessageOptions{Prompt: "我們之前討論了�
 
 <!-- docs-validate: hidden -->
 ```csharp
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
+
+namespace CopilotSdkDocs.ZhTW;
 
 public static class ResumeSessionExample
 {
@@ -213,8 +216,7 @@ public static class ResumeSessionExample
 
         var session = await client.ResumeSessionAsync("user-123-task-456", new ResumeSessionConfig
         {
-            OnPermissionRequest = (req, inv) =>
-                Task.FromResult(new PermissionRequestResult { Kind = PermissionRequestResultKind.Approved }),
+            OnPermissionRequest = PermissionHandler.ApproveAll,
         });
 
         await session.SendAndWaitAsync(new MessageOptions { Prompt = "我們之前討論了什麼？" });
@@ -225,7 +227,10 @@ public static class ResumeSessionExample
 
 ```csharp
 // 從不同的用戶端執行個體（或在重新啟動後）恢復
-var session = await client.ResumeSessionAsync("user-123-task-456");
+var session = await client.ResumeSessionAsync("user-123-task-456", new ResumeSessionConfig
+{
+    OnPermissionRequest = PermissionHandler.ApproveAll,
+});
 
 // 從上次中斷的地方繼續
 await session.SendAndWaitAsync(new MessageOptions { Prompt = "我們之前討論了什麼？" });
