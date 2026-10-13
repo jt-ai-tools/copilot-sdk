@@ -247,11 +247,11 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         if: steps.cache.outputs.cache-hit != 'true'
         with:
-          datadog-api-key: ${{ secrets.DATADOG_API_KEY }}
+          datadog-api-key: "${{ github.repository == 'github/copilot-sdk' && secrets.DATADOG_API_KEY || '' }}"
           datadog-site: ${{ vars.DATADOG_SITE || vars.DD_SITE }}
 
       - name: Set up private source authentication
-        if: steps.cache.outputs.cache-hit != 'true' && github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        if: "${{ github.repository == 'github/copilot-sdk' && (steps.cache.outputs.cache-hit != 'true' && github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) }}"
         uses: ./.github/actions/setup-private-source-auth
         with:
           client-id: ${{ vars.RUNTIME_ACCESSOR_APP_CLIENT_ID }}
@@ -557,7 +557,7 @@ jobs:
       - if: needs.detect-layout.outputs.runtime-source == 'checkout'
         uses: ./.github/actions/setup-bazel
         with:
-          datadog-api-key: ${{ secrets.DATADOG_API_KEY }}
+          datadog-api-key: "${{ github.repository == 'github/copilot-sdk' && secrets.DATADOG_API_KEY || '' }}"
           datadog-site: ${{ vars.DATADOG_SITE || vars.DD_SITE }}
       - uses: actions/setup-go@v6
         with:

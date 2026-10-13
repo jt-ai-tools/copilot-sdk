@@ -199,15 +199,11 @@ jobs:
       - if: inputs.runtime-source == 'checkout' && steps.cache.outputs.cache-hit != 'true' && inputs.prebuilt-addons-artifact == '' && !(runner.os == 'Windows' && inputs.target == 'win32-arm64')
         uses: ./.github/actions/setup-bazel
         with:
-          datadog-api-key: ${{ secrets.DATADOG_API_KEY }}
+          datadog-api-key: "${{ github.repository == 'github/copilot-sdk' && secrets.DATADOG_API_KEY || '' }}"
           datadog-site: ${{ vars.DATADOG_SITE || vars.DD_SITE }}
 
       - name: Set up private source authentication
-        if: >-
-          github.actor != 'dependabot[bot]' &&
-          (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-          inputs.runtime-source == 'checkout' &&
-          steps.cache.outputs.cache-hit != 'true'
+        if: "${{ github.repository == 'github/copilot-sdk' && (github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && inputs.runtime-source == 'checkout' && steps.cache.outputs.cache-hit != 'true') }}"
         uses: ./.github/actions/setup-private-source-auth
         with:
           client-id: ${{ vars.RUNTIME_ACCESSOR_APP_CLIENT_ID }}

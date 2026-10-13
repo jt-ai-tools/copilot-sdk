@@ -494,6 +494,7 @@ jobs:
           retention-days: 1
 
   deploy-snapshot:
+    if: "${{ github.repository == 'github/copilot-sdk' }}"
     name: Publish SNAPSHOT to Maven Central
     needs:
       [
