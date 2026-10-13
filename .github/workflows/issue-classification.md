@@ -1,4 +1,5 @@
 ---
+if: "github.repository == 'github/copilot-sdk'"
 description: Classifies newly opened issues and delegates to type-specific handler workflows
 on:
   issues:

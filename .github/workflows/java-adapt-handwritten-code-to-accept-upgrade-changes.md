@@ -1,4 +1,5 @@
 ---
+if: "github.repository == 'github/copilot-sdk'"
 description: |
   Adapt handwritten Java SDK code to work with regenerated types after a
   Copilot CLI release update. Assumes codegen succeeded and generated code

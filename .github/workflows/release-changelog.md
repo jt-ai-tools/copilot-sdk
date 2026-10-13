@@ -1,4 +1,5 @@
 ---
+if: "github.repository == 'github/copilot-sdk'"
 description: Updates GitHub Release notes from merged PRs/commits. Triggered by the publish workflow or manually via workflow_dispatch.
 on:
   workflow_dispatch:

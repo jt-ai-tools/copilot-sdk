@@ -9,7 +9,7 @@ on:
         description: "Issue number to analyze"
         required: true
         type: string
-if: "github.event_name == 'workflow_dispatch' || github.event.label.name == 'runtime triage'"
+if: "github.repository == 'github/copilot-sdk' && (github.event_name == 'workflow_dispatch' || github.event.label.name == 'runtime triage')"
 permissions:
   contents: read
   issues: read

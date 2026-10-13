@@ -1,4 +1,5 @@
 ---
+if: "github.repository == 'github/copilot-sdk'"
 description: |
   Agentic fix for Java codegen-related build/test failures. Invoked when
   mvn verify fails after code generation changes.

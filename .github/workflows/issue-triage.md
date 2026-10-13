@@ -1,4 +1,5 @@
 ---
+if: "github.repository == 'github/copilot-sdk'"
 description: Triages newly opened issues by labeling, acknowledging, requesting clarification, and closing duplicates
 on:
   roles: all

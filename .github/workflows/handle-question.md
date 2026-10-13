@@ -1,4 +1,5 @@
 ---
+if: "github.repository == 'github/copilot-sdk'"
 description: Handles issues classified as questions by the triage classifier
 concurrency:
   job-discriminator: ${{ inputs.issue_number }}
