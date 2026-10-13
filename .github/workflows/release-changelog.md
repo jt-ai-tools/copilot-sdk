@@ -1,10 +1,10 @@
 ---
-description: Generates release notes from merged PRs/commits. Triggered by the publish workflow or manually via workflow_dispatch.
+description: Updates GitHub Release notes from merged PRs/commits. Triggered by the publish workflow or manually via workflow_dispatch.
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to generate changelog for (e.g., v0.1.30)"
+        description: "Release tag to generate notes for (e.g., v1.0.0)"
         required: true
         type: string
 permissions:
@@ -12,26 +12,21 @@ permissions:
   actions: read
   issues: read
   pull-requests: read
+  copilot-requests: write
 tools:
   github:
     toolsets: [default]
-  edit:
 safe-outputs:
-  create-pull-request:
-    title-prefix: "[changelog] "
-    labels: [automation, changelog]
-    draft: false
   update-release:
     max: 1
 timeout-minutes: 15
 ---
 
-# Release Changelog Generator
+# Release Notes Generator
 
 You are an AI agent that generates well-formatted release notes when a release of the Copilot SDK is published.
 
-- **For stable releases** (tag has no prerelease suffix like `-preview`): update `CHANGELOG.md` via a PR AND update the GitHub Release notes.
-- **For prerelease releases** (tag contains `-preview` or similar suffix): update the GitHub Release notes ONLY. Do NOT modify `CHANGELOG.md` or create a PR.
+Update the GitHub Release notes for **both stable and prerelease releases**. This repository is a read-only source mirror: do NOT modify `CHANGELOG.md`, change repository files, or create a pull request.
 
 Determine which type of release this is by inspecting the tag or fetching the release metadata.
 
@@ -42,16 +37,25 @@ Determine which type of release this is by inspecting the tag or fetching the re
 
 Use the GitHub API to fetch the release corresponding to `${{ github.event.inputs.tag }}` to get its name, publish date, prerelease status, and other metadata.
 
+Use only this public SDK repository's source, history, releases, and pull requests. Do not retrieve or link private runtime source/history. If the target is not a published SDK `v<semver>` release, stop without updating anything; `runtime-*` releases contain acquisition assets, not SDK release notes.
+
 ## Your Task
 
 ### Step 1: Identify the version range
 
-1. The **new version** is the release tag: `${{ github.event.inputs.tag }}`
-2. Fetch the release metadata to determine if this is a **stable** or **prerelease** release.
-3. Determine the **previous version** to diff against:
-   - **For stable releases**: find the previous **stable** release (skip prereleases). Check `CHANGELOG.md` for the most recent version heading (`## [vX.Y.Z](...)`), or fall back to listing releases via the API. This means stable changelogs include ALL changes since the last stable release, even if some were already mentioned in prerelease notes.
+1. **Before any `git log`, `git show`, tag lookup, or commit-range query, first convert the workflow checkout into a full clone by running:**
+   ```bash
+   git fetch --prune --tags --unshallow origin || git fetch --prune --tags origin
+   ```
+   This is **mandatory**. The workflow checkout may be shallow, which can make tag ranges and commit counts incomplete or outright wrong. Do not trust local git history until this command succeeds.
+2. The **new version** is the release tag: `${{ github.event.inputs.tag }}`
+3. Fetch the release metadata to determine if this is a **stable** or **prerelease** release.
+4. Determine the **previous version** to diff against:
+   - Consider only published, non-draft SDK `v<semver>` releases whose publication time precedes the target. Exclude `runtime-*` releases, even for prerelease comparisons.
+   - **For stable releases**: list releases via the API and find the previous **stable** release (skip prereleases and the current release). Do not use the frozen `CHANGELOG.md` as the version baseline. Stable release notes include ALL changes since the last stable release, even if some were already mentioned in prerelease notes.
    - **For prerelease releases**: find the most recent release of **any kind** (stable or prerelease) that precedes this one. This way prerelease notes only cover what's new since the last release.
-4. If no previous release exists at all, use the first commit in the repo as the starting point.
+5. If no previous release exists at all, use the first commit in the repo as the starting point.
+6. After identifying the range, verify it by listing the commits in `PREVIOUS_TAG..NEW_TAG`. If the local result still looks suspiciously small or inconsistent, do **not** proceed based on local git alone — use the GitHub tools as the source of truth for the commits and PRs in the release.
 
 ### Step 2: Gather changes
 
@@ -59,7 +63,7 @@ Use the GitHub API to fetch the release corresponding to `${{ github.event.input
 2. Also list merged pull requests in that range. For each PR, note:
    - PR number and title
    - The PR author
-   - Which SDK(s) were affected (look for prefixes like `[C#]`, `[Python]`, `[Go]`, `[Node]` in the title, or infer from changed files)
+   - Which SDK(s) were affected (look for prefixes like `[C#]`, `[Python]`, `[Go]`, `[Node]`, `[Java]`, `[Rust]` in the title, or infer from changed files)
 3. Ignore:
    - Dependabot/bot PRs that only bump internal dependencies (like `Update @github/copilot to ...`) unless they bring user-facing changes
    - Merge commits with no meaningful content
@@ -72,49 +76,25 @@ Separate the changes into two groups:
 1. **Highlighted features**: Any interesting new feature or significant improvement that deserves its own section with a description and code snippet(s). Read the PR diff and source code to understand the feature well enough to write about it.
 2. **Other changes**: Bug fixes, minor improvements, and smaller features that can be summarized in a single bullet each.
 
+**Format for each highlighted feature** — use an `### Feature:` or `### Fix:` heading, a 1-2 sentence description explaining what it does and why it matters, and at least one short code snippet (max 3 lines). Cover all six SDKs—TypeScript, C#, Go, Python, Java, and Rust—in the combined release notes. Show code examples in the languages whose APIs best illustrate the change, and ensure every user-visible language-specific change appears either as a highlighted feature or under other changes.
+
+**Format for other changes** — use a single `### Other changes` section with a flat bulleted list. Each bullet has a lowercase prefix (`feature:`, `bugfix:`, `improvement:`) and a one-line description linking to the PR. **However, if there are no highlighted features above it, omit the `### Other changes` heading.**
+
 Only include changes that are **user-visible in the published SDK packages**. Skip anything that only affects docs, CI, build tooling, GitHub workflows, test infrastructure, or other internal-only concerns.
 
 Additionally, identify **new contributors** — anyone whose first merged PR to this repo falls within this release range. You can determine this by checking whether the author has any earlier merged PRs in the repository.
 
-### Step 4: Update CHANGELOG.md (stable releases only)
+### Step 4: Update the GitHub Release
 
-**Skip this step entirely for prerelease releases.**
+For both stable and prerelease releases, use the `update-release` output to replace the auto-generated release notes with your formatted notes. **Do not include the version heading** (`## [vX.Y.Z](...) (date)`) in the release notes — the release already has a title showing the version. Start directly with the feature sections or other changes list.
 
-1. Read the current `CHANGELOG.md` file.
-2. Add the new version entry **at the top** of the file, right after the title/header.
-
-**Format for each highlighted feature** — use an `### Feature:` or `### Fix:` heading, a 1-2 sentence description explaining what it does and why it matters, and at least one short code snippet (max 3 lines). Focus on **TypeScript** and **C#** as the primary languages. Only show Go/Python when giving a list of one-liner equivalents across all languages, or when their usage pattern is meaningfully different.
-
-**Format for other changes** — a single `### Other changes` section with a flat bulleted list. Each bullet has a lowercase prefix (`feature:`, `bugfix:`, `improvement:`) and a one-line description linking to the PR. **However, if there are no highlighted features above it, omit the `### Other changes` heading entirely** — just list the bullets directly under the version heading.
-
-3. Use the release's publish date (from the GitHub Release metadata), not today's date. For `workflow_dispatch` runs, fetch the release by tag to get the date.
-4. If there are new contributors, add a `### New contributors` section at the end listing each with a link to their first PR:
-   ```
-   ### New contributors
-   - @username made their first contribution in [#123](https://github.com/github/copilot-sdk/pull/123)
-   ```
-   Omit this section if there are no new contributors.
-5. Make sure the existing content below is preserved exactly as-is.
-
-### Step 5: Create a Pull Request (stable releases only)
-
-**Skip this step entirely for prerelease releases.**
-
-Use the `create-pull-request` output to submit your changes. The PR should:
-- Have a clear title like "Add changelog for vX.Y.Z"
-- Include a brief body summarizing the number of changes
-
-### Step 6: Update the GitHub Release
-
-Use the `update-release` output to replace the auto-generated release notes with your nicely formatted changelog. **Do not include the version heading** (`## [vX.Y.Z](...) (date)`) in the release notes — the release already has a title showing the version. Start directly with the feature sections or other changes list.
+If there are new contributors, add a `### New contributors` section at the end listing each with a link to their first PR. Omit this section if there are no new contributors.
 
 ## Example Output
 
-Here is an example of what a changelog entry should look like, based on real commits from this repo. **Follow this style exactly.**
+Here is an example of what the release notes should look like, based on real commits from this repo. **Follow this style exactly.**
 
 ````markdown
-## [v0.1.28](https://github.com/github/copilot-sdk/releases/tag/v0.1.28) (2026-02-14)
-
 ### Feature: support overriding built-in tools
 
 Applications can now override built-in tools such as `edit` or `grep`. To do this, register a custom tool with the same name and set the override flag. ([#636](https://github.com/github/copilot-sdk/pull/636))
@@ -139,6 +119,8 @@ While `session.rpc.models.setModel()` already worked, there is now a convenience
 - C#: `session.SetModel("gpt-4o")`
 - Python: `session.set_model("gpt-4o")`
 - Go: `session.SetModel("gpt-4o")`
+- Java: `session.setModel("gpt-4o").get()`
+- Rust: `session.set_model("gpt-4o", None).await?`
 
 ### Other changes
 
@@ -154,8 +136,9 @@ While `session.rpc.models.setModel()` already worked, there is now a convenience
 ````
 
 **Key rules visible in the example:**
+
 - Highlighted features get their own `### Feature:` heading, a short description, and code snippets
-- Code snippets are TypeScript and C# primarily; Go/Python only when listing one-liner equivalents or when meaningfully different
+- Code snippets use whichever of TypeScript, C#, Go, Python, Java, and Rust best illustrate the change; list all affected languages when showing equivalents
 - The `### Other changes` section is a flat bulleted list with lowercase `bugfix:` / `feature:` / `improvement:` prefixes
 - PR numbers are linked inline, not at the end with author attribution (keep it clean)
 
@@ -165,5 +148,5 @@ While `session.rpc.models.setModel()` already worked, there is now a convenience
 2. **Be accurate**: Only include changes that actually landed in this release range. Don't hallucinate PRs.
 3. **Attribute correctly**: Always link to the PR number. Do not add explicit author attribution.
 4. **Skip noise**: Don't include trivial changes (typo fixes in comments, whitespace changes) unless they're the only changes.
-5. **Preserve history**: Never modify existing entries in CHANGELOG.md — only prepend new ones.
-6. **Handle edge cases**: If there are no meaningful changes (e.g., only internal dependency bumps), still create an entry noting "Internal dependency updates only" or similar.
+5. **Preserve history**: Leave `CHANGELOG.md` and all repository files unchanged.
+6. **Handle edge cases**: If there are no meaningful changes (e.g., only internal dependency bumps), still update the release notes with "Internal dependency updates only" or similar.

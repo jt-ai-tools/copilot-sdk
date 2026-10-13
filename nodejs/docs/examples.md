@@ -7,19 +7,22 @@ A practical guide to writing extensions using the `@github/copilot-sdk` extensio
 Every extension starts with the same boilerplate:
 
 ```js
-import { approveAll } from "@github/copilot-sdk";
 import { joinSession } from "@github/copilot-sdk/extension";
 
 const session = await joinSession({
-    onPermissionRequest: approveAll,
-    hooks: { /* ... */ },
-    tools: [ /* ... */ ],
+    hooks: {
+        /* ... */
+    },
+    tools: [
+        /* ... */
+    ],
 });
 ```
 
 `joinSession` returns a `CopilotSession` object you can use to send messages and subscribe to events.
 
 > **Platform notes (Windows vs macOS/Linux):**
+>
 > - Use `process.platform === "win32"` to detect Windows at runtime.
 > - Clipboard: `pbcopy` on macOS, `clip` on Windows.
 > - Use `exec()` instead of `execFile()` for `.cmd` scripts like `code`, `npx`, `npm` on Windows.
@@ -33,7 +36,6 @@ Use `session.log()` to surface messages to the user in the CLI timeline:
 
 ```js
 const session = await joinSession({
-    onPermissionRequest: approveAll,
     hooks: {
         onSessionStart: async () => {
             await session.log("My extension loaded");
@@ -74,7 +76,7 @@ tools: [
             return `Processed: ${args.input}`;
         },
     },
-]
+];
 ```
 
 ### Tool that invokes an external shell command
@@ -139,7 +141,7 @@ handler: async (args, invocation) => {
     // invocation.toolCallId — unique ID for this tool call
     // invocation.toolName   — name of the tool being called
     return "done";
-}
+};
 ```
 
 ---
@@ -150,16 +152,17 @@ Hooks intercept and modify behavior at key lifecycle points. Register them in th
 
 ### Available Hooks
 
-| Hook | Fires When | Can Modify |
-|------|-----------|------------|
-| `onUserPromptSubmitted` | User sends a message | The prompt text, add context |
-| `onPreToolUse` | Before a tool executes | Tool args, permission decision, add context |
-| `onPostToolUse` | After a tool executes | Tool result, add context |
-| `onSessionStart` | Session starts or resumes | Add context, modify config |
-| `onSessionEnd` | Session ends | Cleanup actions, summary |
-| `onErrorOccurred` | An error occurs | Error handling strategy (retry/skip/abort) |
+| Hook                    | Fires When                               | Can Modify                                  |
+| ----------------------- | ---------------------------------------- | ------------------------------------------- |
+| `onUserPromptSubmitted` | User sends a message                     | The prompt text, add context                |
+| `onPreToolUse`          | Before a tool executes                   | Tool args, permission decision, add context |
+| `onPostToolUse`         | After a tool executes successfully       | Tool result, add context                    |
+| `onPostToolUseFailure`  | After a tool execution returns a failure | Add hidden guidance to the model            |
+| `onSessionStart`        | Session starts or resumes                | Add context                                 |
+| `onSessionEnd`          | Session ends                             | Cleanup actions, summary                    |
+| `onErrorOccurred`       | An error occurs                          | Error handling strategy (retry/skip/abort)  |
 
-All hook inputs include `timestamp` (unix ms) and `cwd` (working directory).
+All hook inputs include `timestamp` (`Date`) and `workingDirectory`.
 
 ### Modifying the user's message
 
@@ -265,12 +268,18 @@ hooks: {
 }
 ```
 
-### Augmenting tool results with extra context
+### Reacting when a tool fails
+
+`onPostToolUse` only fires for successful tool executions. To observe or react
+to failures, register `onPostToolUseFailure`. The input includes
+`input.error` (the stringified failure message); only `additionalContext` on
+the return value is consumed by the runtime, and it is appended as hidden
+guidance alongside the failed tool result.
 
 ```js
 hooks: {
-    onPostToolUse: async (input) => {
-        if (input.toolName === "bash" && input.toolResult?.resultType === "failure") {
+    onPostToolUseFailure: async (input) => {
+        if (input.toolName === "bash") {
             return {
                 additionalContext: "The command failed. Try a different approach.",
             };
@@ -359,7 +368,7 @@ session.on((event) => {
 
 ```js
 const unsubscribe = session.on("tool.execution_complete", (event) => {
-    // event.data.toolName, event.data.success, event.data.result, event.data.error
+    // event.data.success, event.data.result, event.data.error
 });
 
 // Later, stop listening
@@ -383,7 +392,6 @@ function copyToClipboard(text) {
 }
 
 const session = await joinSession({
-    onPermissionRequest: approveAll,
     hooks: {
         onUserPromptSubmitted: async (input) => {
             if (/\\bcopy\\b/i.test(input.prompt)) {
@@ -404,18 +412,18 @@ session.on("assistant.message", (event) => {
 
 ### Top 10 Most Useful Event Types
 
-| Event Type | Description | Key Data Fields |
-|-----------|-------------|-----------------|
-| `assistant.message` | Agent's final response | `content`, `messageId`, `toolRequests` |
-| `assistant.streaming_delta` | Token-by-token streaming (ephemeral) | `totalResponseSizeBytes` |
-| `tool.execution_start` | A tool is about to run | `toolCallId`, `toolName`, `arguments` |
-| `tool.execution_complete` | A tool finished running | `toolCallId`, `toolName`, `success`, `result`, `error` |
-| `user.message` | User sent a message | `content`, `attachments`, `source` |
-| `session.idle` | Session finished processing a turn | `backgroundTasks` |
-| `session.error` | An error occurred | `errorType`, `message`, `stack` |
-| `permission.requested` | Agent needs permission (shell, file write, etc.) | `requestId`, `permissionRequest.kind` |
-| `session.shutdown` | Session is ending | `shutdownType`, `totalPremiumRequests`, `codeChanges` |
-| `assistant.turn_start` | Agent begins a new thinking/response cycle | `turnId` |
+| Event Type                  | Description                                      | Key Data Fields                                        |
+| --------------------------- | ------------------------------------------------ | ------------------------------------------------------ |
+| `assistant.message`         | Agent's final response                           | `content`, `messageId`, `toolRequests`                 |
+| `assistant.message_delta`   | Message content chunks (ephemeral)               | `deltaContent`                                         |
+| `tool.execution_start`      | A tool is about to run                           | `toolCallId`, `toolName`, `arguments`                  |
+| `tool.execution_complete`   | A tool finished running                          | `toolCallId`, `success`, `result`, `error`             |
+| `user.message`              | User sent a message                              | `content`, `attachments`, `source`                     |
+| `session.idle`              | Session finished processing a turn               | `aborted`                                              |
+| `session.error`             | An error occurred                                | `errorType`, `message`, `stack`                        |
+| `permission.requested`      | Agent needs permission (shell, file write, etc.) | `requestId`, `permissionRequest.kind`                  |
+| `session.shutdown`          | Session is ending                                | `shutdownType`, `totalPremiumRequests`, `codeChanges`  |
+| `assistant.turn_start`      | Agent begins a new thinking/response cycle       | `turnId`                                               |
 
 ### Example: Detecting when the plan file is created or edited
 
@@ -425,15 +433,12 @@ Correlate `tool.execution_start` / `tool.execution_complete` events by `toolCall
 ```js
 import { existsSync, watchFile, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { approveAll } from "@github/copilot-sdk";
 import { joinSession } from "@github/copilot-sdk/extension";
 
 const agentEdits = new Set(); // toolCallIds for in-flight agent edits
 const recentAgentPaths = new Set(); // paths recently written by the agent
 
-const session = await joinSession({
-    onPermissionRequest: approveAll,
-});
+const session = await joinSession();
 
 const workspace = session.workspacePath; // e.g. ~/.copilot/session-state/<id>
 if (workspace) {
@@ -442,8 +447,10 @@ if (workspace) {
 
     // Track agent edits to suppress false triggers
     session.on("tool.execution_start", (event) => {
-        if ((event.data.toolName === "edit" || event.data.toolName === "create")
-            && String(event.data.arguments?.path || "").endsWith("plan.md")) {
+        if (
+            (event.data.toolName === "edit" || event.data.toolName === "create") &&
+            String(event.data.arguments?.path || "").endsWith("plan.md")
+        ) {
             agentEdits.add(event.data.toolCallId);
             recentAgentPaths.add(planPath);
         }
@@ -480,14 +487,11 @@ Filter out agent edits by tracking `tool.execution_start` / `tool.execution_comp
 ```js
 import { watch, readFileSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
-import { approveAll } from "@github/copilot-sdk";
 import { joinSession } from "@github/copilot-sdk/extension";
 
 const agentEditPaths = new Set();
 
-const session = await joinSession({
-    onPermissionRequest: approveAll,
-});
+const session = await joinSession();
 
 const cwd = process.cwd();
 const IGNORE = new Set(["node_modules", ".git", "dist"]);
@@ -549,9 +553,7 @@ const response = await session.sendAndWait({ prompt: "What is 2 + 2?" });
 ```js
 await session.send({
     prompt: "Review this file",
-    attachments: [
-        { type: "file", path: "./src/index.ts" },
-    ],
+    attachments: [{ type: "file", path: "./src/index.ts" }],
 });
 ```
 
@@ -566,12 +568,12 @@ const session = await joinSession({
     onPermissionRequest: async (request) => {
         if (request.kind === "shell") {
             // request.fullCommandText has the shell command
-            return { kind: "approved" };
+            return { kind: "approve-once" };
         }
         if (request.kind === "write") {
-            return { kind: "approved" };
+            return { kind: "approve-once" };
         }
-        return { kind: "denied-by-rules" };
+        return { kind: "reject" };
     },
 });
 ```
@@ -582,7 +584,6 @@ Register `onUserInputRequest` to enable the agent's `ask_user` tool:
 
 ```js
 const session = await joinSession({
-    onPermissionRequest: approveAll,
     onUserInputRequest: async (request) => {
         // request.question has the agent's question
         // request.choices has the options (if multiple choice)
@@ -599,7 +600,6 @@ An extension that combines tools, hooks, and events.
 
 ```js
 import { execFile, exec } from "node:child_process";
-import { approveAll } from "@github/copilot-sdk";
 import { joinSession } from "@github/copilot-sdk/extension";
 
 const isWindows = process.platform === "win32";
@@ -617,7 +617,6 @@ function openInEditor(filePath) {
 }
 
 const session = await joinSession({
-    onPermissionRequest: approveAll,
     hooks: {
         onUserPromptSubmitted: async (input) => {
             if (/\\bcopy this\\b/i.test(input.prompt)) {
@@ -630,8 +629,11 @@ const session = await joinSession({
         onPreToolUse: async (input) => {
             if (input.toolName === "bash") {
                 const cmd = String(input.toolArgs?.command || "");
-                if (/rm\\s+-rf\\s+\\//i.test(cmd) || /Remove-Item\\s+.*-Recurse/i.test(cmd)) {
-                    return { permissionDecision: "deny" };
+                if (/rm\\s+-rf\\s+\//i.test(cmd) || /Remove-Item\\s+.*-Recurse/i.test(cmd)) {
+                    return {
+                        permissionDecision: "deny",
+                        permissionDecisionReason: "Destructive commands are not allowed.",
+                    };
                 }
             }
         },
@@ -675,7 +677,6 @@ session.on("assistant.message", (event) => {
 });
 
 session.on("tool.execution_complete", (event) => {
-    // event.data.success, event.data.toolName, event.data.result
+    // event.data.success, event.data.result
 });
 ```
-

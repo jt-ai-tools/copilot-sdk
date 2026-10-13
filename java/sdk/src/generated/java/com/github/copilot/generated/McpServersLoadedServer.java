@@ -1,0 +1,43 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *--------------------------------------------------------------------------------------------*/
+
+// AUTO-GENERATED FILE - DO NOT EDIT
+// Generated from: session-events.schema.json
+
+package com.github.copilot.generated;
+
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import javax.annotation.processing.Generated;
+
+/**
+ * A single MCP server status summary in `session.mcp_servers_loaded`, including name, status, source, transport, and plugin metadata.
+ *
+ * @since 1.0.0
+ */
+@javax.annotation.processing.Generated("copilot-sdk-codegen")
+@JsonInclude(JsonInclude.Include.NON_NULL)
+@JsonIgnoreProperties(ignoreUnknown = true)
+public record McpServersLoadedServer(
+    /** Server name (config key) */
+    @JsonProperty("name") String name,
+    /** Connection status: connected, failed, needs-auth, pending, disabled, stopped, or not_configured */
+    @JsonProperty("status") McpServerStatus status,
+    /** Configuration source: user, workspace, plugin, builtin, or managed */
+    @JsonProperty("source") McpServerSource source,
+    /** Human-readable display name supplied by a managed server catalog. */
+    @JsonProperty("displayName") String displayName,
+    /** Error message if the server failed to connect */
+    @JsonProperty("error") String error,
+    /** Server-advertised metadata for a connected server. Omitted when no live connection metadata is available, including while pending or when failed, disabled, stopped, or not configured. */
+    @JsonProperty("serverMetadata") McpServerMetadata serverMetadata,
+    /** Transport mechanism: stdio, http, sse (deprecated), or memory (in-process MCP server) */
+    @JsonProperty("transport") McpServerTransport transport,
+    /** Name of the plugin that supplied the effective MCP server config, only when source is plugin */
+    @JsonProperty("pluginName") String pluginName,
+    /** Version of the plugin that supplied the effective MCP server config, only when source is plugin */
+    @JsonProperty("pluginVersion") String pluginVersion
+) {
+}

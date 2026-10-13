@@ -15,15 +15,14 @@ fi
 
 # Determine COPILOT_CLI_PATH
 if [ -z "$COPILOT_CLI_PATH" ]; then
-    # Try to find it relative to the SDK
     SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-    POTENTIAL_PATH="$SCRIPT_DIR/../nodejs/node_modules/@github/copilot/index.js"
-    if [ -f "$POTENTIAL_PATH" ]; then
+    if POTENTIAL_PATH="$(cd "$SCRIPT_DIR/../nodejs" && npm run --silent prepare:runtime -- --print-path)" &&
+        [ -n "$POTENTIAL_PATH" ] && [ -f "$POTENTIAL_PATH" ]; then
         export COPILOT_CLI_PATH="$POTENTIAL_PATH"
         echo "📍 Auto-detected CLI path: $COPILOT_CLI_PATH"
     else
         echo "❌ COPILOT_CLI_PATH environment variable not set"
-        echo "   Run: export COPILOT_CLI_PATH=/path/to/dist-cli/index.js"
+        echo "   Run: export COPILOT_CLI_PATH=/path/to/copilot"
         exit 1
     fi
 fi
@@ -43,7 +42,7 @@ cd "$(dirname "$0")"
 echo "=== Running Go SDK E2E Tests ==="
 echo
 
-go test -v ./... -race
+go test -v ./... -race -timeout=20m
 
 echo
 echo "✅ All tests passed!"

@@ -1,0 +1,174 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+
+[package]
+name = "github-copilot-sdk"
+version = "0.0.0-dev"
+edition = "2024"
+rust-version = "1.94.0"
+description = "Rust SDK for programmatic control of the GitHub Copilot CLI via JSON-RPC."
+keywords = ["copilot", "github", "ai", "json-rpc", "sdk"]
+categories = ["api-bindings", "development-tools"]
+repository = "https://github.com/github/copilot-sdk"
+homepage = "https://github.com/github/copilot-sdk"
+documentation = "https://docs.rs/github-copilot-sdk"
+readme = "README.md"
+license = "MIT"
+include = [
+    "src/**/*",
+    "build/**/*",
+    "examples/**/*",
+    "tests/**/*",
+    "build.rs",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE",
+    "cli-version.txt",
+    "cli-version-in-process.txt",
+]
+
+[lib]
+name = "github_copilot_sdk"
+
+[features]
+default = ["bundled-cli"]
+runtime = []
+bundled-cli = ["runtime", "dep:tar", "dep:flate2", "dep:zip"]
+in-process = ["runtime", "dep:libloading"]
+local-runtime = ["in-process"]
+bundled-in-process = ["bundled-cli", "in-process"]
+derive = ["dep:schemars"]
+test-support = []
+
+# Build docs.rs documentation with all features so feature-gated APIs
+# (e.g. `define_tool`, `schema_for`) appear and intra-doc links resolve.
+# Mirror this locally with: `cargo doc --no-deps --all-features`.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints.clippy]
+# Threshold lives in clippy.toml; consumers run on 2 MiB Tokio worker stacks.
+large_futures = "warn"
+
+[dependencies]
+async-trait = "0.1"
+indexmap = { version = "2", features = ["serde"] }
+schemars = { version = "1", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "sync", "rt", "process", "net", "time", "macros"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = { version = "0.7", default-features = false }
+tracing = "0.1"
+dirs = "5"
+libloading = { version = "0.9", optional = true }
+parking_lot = "0.12"
+regex = "1"
+getrandom = "0.4"
+uuid = { version = "1", default-features = false, features = ["v4"] }
+flate2 = { version = "1", optional = true }
+tar = { version = "0.4", optional = true }
+# LLM inference callback transport: idiomatic HTTP/WebSocket forwarding for the
+# `CopilotRequestHandler`, plus base64/byte/stream plumbing for the chunk protocol.
+base64 = "0.23"
+bytes = "1"
+http = "1"
+futures-util = "0.3"
+reqwest = { version = "0.13", default-features = false, features = ["stream", "http2", "native-tls"] }
+tokio-tungstenite = { version = "0.28.0", default-features = false, features = ["connect", "native-tls"] }
+
+[target.'cfg(windows)'.dependencies]
+zip = { version = "7.2.0", default-features = false, features = ["deflate"], optional = true }
+windows-sys = { version = "0.61", default-features = false, features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ProcessSnapshotting",
+    "Win32_System_JobObjects",
+    "Win32_System_Kernel",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+flate2 = "1"
+hpke = { version = "0.12", default-features = false, features = ["alloc", "x25519"] }
+native-tls = "0.2"
+rand_core = { version = "0.6", features = ["getrandom"] }
+ahp = { git = "https://github.com/microsoft/agent-host-protocol", tag = "rust/v0.9.0" }
+ahp-types = { git = "https://github.com/microsoft/agent-host-protocol", tag = "rust/v0.9.0" }
+ahp-ws = { git = "https://github.com/microsoft/agent-host-protocol", tag = "rust/v0.9.0", default-features = false }
+rusqlite = { version = "0.40", features = ["bundled"] }
+schemars = "1"
+serial_test = "4"
+sha2 = "0.10"
+tar = "0.4"
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+ureq = { version = "3", default-features = false, features = ["native-tls"] }
+zip = { version = "7.2.0", default-features = false, features = ["deflate"] }
+
+# Integration tests that call test-support-only Client methods (e.g.
+# `from_streams_with_connection_token`, `from_streams_with_trace_provider`)
+# require the `test-support` feature because `cfg(test)` is not set on the
+# library when Cargo compiles it for integration tests.
+[[test]]
+name = "session_test"
+required-features = ["test-support"]
+
+[[test]]
+name = "runtime_host_e2e"
+required-features = ["runtime", "test-support"]
+
+[[test]]
+name = "protocol_version_test"
+required-features = ["test-support"]
+
+[[test]]
+name = "extension_launch_provider_test"
+required-features = ["test-support"]
+
+[[test]]
+name = "installation_confirmation_test"
+required-features = ["test-support"]
+
+[[test]]
+name = "extension_launch_provider_runtime_test"
+required-features = ["test-support"]
+
+[[bin]]
+name = "copilot-extension-test-fixture"
+path = "tests/fixtures/extension_fixture.rs"
+required-features = ["test-support"]
+test = false
+bench = false
+
+[[bin]]
+name = "copilot-host-crash-fixture"
+path = "tests/fixtures/host_crash_fixture.rs"
+required-features = ["test-support"]
+test = false
+bench = false
+
+[[bin]]
+name = "copilot-connectors-runtime-fixture"
+path = "tests/fixtures/connector-runtime/src/main.rs"
+required-features = ["test-support", "in-process"]
+test = false
+bench = false
+
+[[test]]
+name = "prepared_session_test"
+required-features = ["test-support"]
+
+[[test]]
+name = "skill_provider_test"
+required-features = ["test-support"]
+[build-dependencies]
+dirs = "5"
+flate2 = "1"
+native-tls = "0.2"
+serde_json = "1"
+# 0.11 adds a second digest/block-buffer stack beside the SDK's transitive 0.10.
+sha2 = "0.10"
+tar = "0.4"
+ureq = { version = "3", default-features = false, features = ["native-tls"] }
+zip = { version = "7.2.0", default-features = false, features = ["deflate"] }

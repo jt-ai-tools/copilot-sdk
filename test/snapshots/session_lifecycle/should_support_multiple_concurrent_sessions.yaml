@@ -1,13 +1,6 @@
 models:
-  - claude-sonnet-4.5
+  - claude-sonnet-5
 conversations:
-  - messages:
-      - role: system
-        content: ${system}
-      - role: user
-        content: What is 3+3? Reply with just the number.
-      - role: assistant
-        content: "6"
   - messages:
       - role: system
         content: ${system}
@@ -15,3 +8,10 @@ conversations:
         content: What is 1+1? Reply with just the number.
       - role: assistant
         content: "2"
+  - messages:
+      - role: system
+        content: ${system}
+      - role: user
+        content: What is 3+3? Reply with just the number.
+      - role: assistant
+        content: "6"

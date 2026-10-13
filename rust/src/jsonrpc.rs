@@ -1,0 +1,1001 @@
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+
+use parking_lot::{Mutex, RwLock};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+use tracing::{Instrument, debug, error, warn};
+
+use crate::{Error, ErrorKind, ProtocolErrorKind};
+
+/// Callback invoked synchronously by the JSON-RPC read loop the instant a
+/// successful response is parsed, before the response is delivered to the
+/// awaiter and before the read loop dispatches the next message. Use this
+/// when client-side state (for example, registering a server-assigned
+/// session id with the router) must be visible to any subsequent
+/// notification on the same connection.
+///
+/// If the callback returns an error, that error is delivered to the
+/// awaiter in place of the response.
+pub(crate) type InlineResponseCallback =
+    Box<dyn FnOnce(&JsonRpcResponse) -> Result<(), Error> + Send + Sync>;
+
+pub(crate) type RequestHandler = Arc<
+    dyn Fn(Value) -> futures_util::future::BoxFuture<'static, Result<Value, Error>> + Send + Sync,
+>;
+type RequestHandlers = Arc<RwLock<HashMap<String, RequestHandler>>>;
+
+fn remote_error_log_message<'a>(method: &str, message: &'a str) -> &'a str {
+    // Listener negotiation carries a token that a remote error may echo.
+    match method {
+        "host.getConfiguration" | "host.ready" => "listener negotiation request rejected",
+        _ => message,
+    }
+}
+
+/// Internal pairing of the response delivery channel with an optional
+/// inline callback that the read loop runs synchronously before delivery.
+struct PendingRequest {
+    sender: oneshot::Sender<JsonRpcResponse>,
+    inline_callback: Option<InlineResponseCallback>,
+}
+
+/// A JSON-RPC 2.0 request message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsonRpcRequest {
+    /// Protocol version (always `"2.0"`).
+    pub jsonrpc: String,
+    /// Request ID for correlating responses.
+    pub id: u64,
+    /// RPC method name.
+    pub method: String,
+    /// Optional method parameters.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub params: Option<Value>,
+}
+
+/// A JSON-RPC 2.0 response message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsonRpcResponse {
+    /// Protocol version (always `"2.0"`).
+    pub jsonrpc: String,
+    /// Request ID this response correlates to.
+    pub id: u64,
+    /// Success payload (mutually exclusive with `error`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    /// Error payload (mutually exclusive with `result`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<JsonRpcError>,
+}
+
+/// A JSON-RPC 2.0 error object.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonRpcError {
+    /// Numeric error code.
+    pub code: i32,
+    /// Human-readable error description.
+    pub message: String,
+    /// Optional structured error data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+}
+
+/// Standard JSON-RPC 2.0 error codes.
+pub mod error_codes {
+    /// Method not found (-32601).
+    pub const METHOD_NOT_FOUND: i32 = -32601;
+    /// Invalid method parameters (-32602).
+    pub const INVALID_PARAMS: i32 = -32602;
+    /// Internal server error (-32603).
+    #[allow(dead_code, reason = "standard JSON-RPC code, reserved for future use")]
+    pub const INTERNAL_ERROR: i32 = -32603;
+    /// Request cancelled by the peer's `$/cancelRequest` (-32800).
+    pub const REQUEST_CANCELLED: i32 = -32800;
+}
+
+/// A JSON-RPC 2.0 notification (no `id`, no response expected).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsonRpcNotification {
+    /// Protocol version (always `"2.0"`).
+    pub jsonrpc: String,
+    /// Notification method name.
+    pub method: String,
+    /// Optional notification parameters.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub params: Option<Value>,
+}
+
+/// A parsed JSON-RPC 2.0 message — request, response, or notification.
+#[derive(Debug, Clone, Serialize)]
+pub enum JsonRpcMessage {
+    /// An incoming or outgoing request.
+    Request(JsonRpcRequest),
+    /// A response to a previous request.
+    Response(JsonRpcResponse),
+    /// A fire-and-forget notification.
+    Notification(JsonRpcNotification),
+}
+
+/// Custom deserializer that dispatches based on field presence instead of
+/// `#[serde(untagged)]` which tries each variant sequentially (3× parse
+/// attempts for Notification — the hot-path streaming variant).
+///
+/// Dispatch logic:
+/// - has `id` + has `method` → Request
+/// - has `id` + no `method` → Response
+/// - no `id`                → Notification
+impl<'de> Deserialize<'de> for JsonRpcMessage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut value = Value::deserialize(deserializer)?;
+        let obj = value
+            .as_object_mut()
+            .ok_or_else(|| serde::de::Error::custom("expected a JSON object"))?;
+
+        let has_id = obj.contains_key("id");
+        let has_method = obj.contains_key("method");
+
+        // Preserve the owned payload instead of rebuilding its JSON containers
+        // while serde validates the envelope. Optional null payloads remain None.
+        let payload_key = if has_id && !has_method {
+            "result"
+        } else {
+            "params"
+        };
+        let payload = obj.remove(payload_key).filter(|value| !value.is_null());
+
+        if has_id && has_method {
+            JsonRpcRequest::deserialize(value)
+                .map(|mut request| {
+                    request.params = payload;
+                    JsonRpcMessage::Request(request)
+                })
+                .map_err(serde::de::Error::custom)
+        } else if has_id {
+            JsonRpcResponse::deserialize(value)
+                .map(|mut response| {
+                    response.result = payload;
+                    JsonRpcMessage::Response(response)
+                })
+                .map_err(serde::de::Error::custom)
+        } else {
+            JsonRpcNotification::deserialize(value)
+                .map(|mut notification| {
+                    notification.params = payload;
+                    JsonRpcMessage::Notification(notification)
+                })
+                .map_err(serde::de::Error::custom)
+        }
+    }
+}
+
+impl JsonRpcRequest {
+    /// Create a new JSON-RPC request with the given ID, method, and params.
+    pub fn new(id: u64, method: &str, params: Option<Value>) -> Self {
+        Self {
+            jsonrpc: "2.0".to_string(),
+            id,
+            method: method.to_string(),
+            params,
+        }
+    }
+}
+
+impl JsonRpcResponse {
+    /// Returns `true` if this response contains an error.
+    #[allow(dead_code)]
+    pub fn is_error(&self) -> bool {
+        self.error.is_some()
+    }
+}
+
+const CONTENT_LENGTH_HEADER: &str = "Content-Length: ";
+
+/// Rewrites unpaired UTF-16 surrogate escapes to `\uFFFD`.
+///
+/// Returns `None` when the body contains no unpaired surrogate, so valid
+/// frames do not incur a repair allocation.
+fn repair_lone_surrogates(body: &[u8]) -> Option<Vec<u8>> {
+    fn hex_escape_at(body: &[u8], index: usize) -> Option<u16> {
+        let digits = body.get(index + 2..index + 6)?;
+        let text = std::str::from_utf8(digits).ok()?;
+        u16::from_str_radix(text, 16).ok()
+    }
+
+    let mut repaired = None;
+    let mut in_string = false;
+    let mut index = 0;
+
+    while index < body.len() {
+        let byte = body[index];
+
+        if !in_string {
+            in_string = byte == b'"';
+            index += 1;
+            continue;
+        }
+
+        match byte {
+            b'"' => {
+                in_string = false;
+                index += 1;
+            }
+            // Consume non-Unicode escapes whole so an escaped backslash cannot
+            // be mistaken for the start of a surrogate escape.
+            b'\\' if body.get(index + 1) != Some(&b'u') => index += 2,
+            b'\\' => {
+                let Some(unit) = hex_escape_at(body, index) else {
+                    index += 2;
+                    continue;
+                };
+
+                let is_pair = (0xD800..0xDC00).contains(&unit)
+                    && body.get(index + 6) == Some(&b'\\')
+                    && body.get(index + 7) == Some(&b'u')
+                    && hex_escape_at(body, index + 6)
+                        .is_some_and(|low| (0xDC00..0xE000).contains(&low));
+
+                if is_pair {
+                    index += 12;
+                    continue;
+                }
+
+                if (0xD800..0xE000).contains(&unit) {
+                    let output = repaired.get_or_insert_with(|| body.to_vec());
+                    output[index..index + 6].copy_from_slice(br"\ufffd");
+                }
+                index += 6;
+            }
+            _ => index += 1,
+        }
+    }
+
+    repaired
+}
+
+/// One framed JSON-RPC message handed to the writer actor.
+///
+/// `frame` is the fully serialized bytes (header + body); the caller pays
+/// the serde cost synchronously before enqueueing so the actor never sees a
+/// `Result` from JSON encoding. When present, `ack` resolves once the bytes have been
+/// fully written and flushed (or the underlying I/O reports an error). If
+/// the caller drops the `oneshot::Receiver`, the actor still completes the
+/// frame — caller cancellation cannot desync the wire.
+struct WriteCommand {
+    frame: Vec<u8>,
+    ack: Option<oneshot::Sender<Result<(), std::io::Error>>>,
+}
+
+/// Inbound requests that honor `$/cancelRequest`.
+///
+/// The read loop registers each one synchronously before forwarding it. This
+/// preserves request/cancellation ordering across the router's separate queues.
+#[derive(Default)]
+pub(crate) struct CancellableRequests {
+    pending: Mutex<HashMap<u64, Arc<CancellationToken>>>,
+}
+
+impl CancellableRequests {
+    fn honors_cancellation(method: &str) -> bool {
+        use crate::generated::api_types::rpc_methods;
+
+        matches!(
+            method,
+            crate::installation_confirmation::CONFIRM_METHOD
+                | rpc_methods::SKILLPROVIDER_LIST
+                | rpc_methods::SKILLPROVIDER_READ
+        )
+    }
+
+    fn register(&self, id: u64) -> bool {
+        let mut pending = self.pending.lock();
+        match pending.entry(id) {
+            Entry::Vacant(entry) => {
+                entry.insert(Arc::new(CancellationToken::new()));
+                true
+            }
+            Entry::Occupied(_) => false,
+        }
+    }
+
+    fn cancel(&self, id: u64) {
+        if let Some(token) = self.pending.lock().get(&id) {
+            token.cancel();
+        }
+    }
+
+    fn clear(&self) {
+        self.pending.lock().clear();
+    }
+
+    /// Take ownership of a registered request's cancellation until the
+    /// returned guard drops, or `None` if the connection already retired it.
+    pub(crate) fn claim(self: &Arc<Self>, id: u64) -> Option<PendingCancellation> {
+        let cancellation = self.pending.lock().get(&id)?.clone();
+        Some(PendingCancellation {
+            requests: self.clone(),
+            id,
+            cancellation,
+        })
+    }
+}
+
+pub(crate) struct PendingCancellation {
+    requests: Arc<CancellableRequests>,
+    id: u64,
+    cancellation: Arc<CancellationToken>,
+}
+
+impl PendingCancellation {
+    /// Cancelled when the runtime sends `$/cancelRequest` for this request.
+    pub(crate) fn cancellation(&self) -> &CancellationToken {
+        &self.cancellation
+    }
+}
+
+impl Drop for PendingCancellation {
+    fn drop(&mut self) {
+        let mut pending = self.requests.pending.lock();
+        if pending
+            .get(&self.id)
+            .is_some_and(|token| Arc::ptr_eq(token, &self.cancellation))
+        {
+            pending.remove(&self.id);
+        }
+    }
+}
+
+/// Low-level JSON-RPC 2.0 client over Content-Length-framed streams.
+///
+/// # Cancel safety
+///
+/// All public methods (`write`, `send_request`) are **cancel-safe**: the
+/// actual bytes hit the wire on a dedicated background actor task, so
+/// dropping the caller's future after `await` returns `Pending` cannot
+/// produce a partial frame on the wire. Frames either land atomically or
+/// the underlying I/O fails. See `cancel-safety review` artifact for the
+/// full RFD-400 reasoning.
+pub struct JsonRpcClient {
+    request_id: AtomicU64,
+    /// Sender side of the writer actor's command queue. Public methods
+    /// pre-serialize their frames and enqueue here; the background actor
+    /// drains the queue and serializes writes onto the underlying
+    /// `AsyncWrite`. Unbounded by design — RFD 400 explicitly permits this
+    /// for cancel-safety, and JSON-RPC frames are small relative to the
+    /// natural request/response back-pressure of the wire.
+    write_tx: mpsc::UnboundedSender<WriteCommand>,
+    pending_requests: Arc<RwLock<HashMap<u64, PendingRequest>>>,
+    notification_tx: broadcast::Sender<JsonRpcNotification>,
+    request_tx: mpsc::UnboundedSender<JsonRpcRequest>,
+    request_handlers: RequestHandlers,
+    connection_closed: CancellationToken,
+    pub(crate) cancellable_requests: Arc<CancellableRequests>,
+    read_task: Mutex<Option<JoinHandle<()>>>,
+    write_task: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl JsonRpcClient {
+    /// Create a new client from async read/write streams.
+    ///
+    /// Spawns two background tasks: a reader that dispatches incoming
+    /// messages to pending request channels, the notification broadcast,
+    /// or the request-forwarding channel; and a writer actor that owns the
+    /// underlying `AsyncWrite` and serializes frames atomically.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new(
+        writer: impl AsyncWrite + Unpin + Send + 'static,
+        reader: impl AsyncRead + Unpin + Send + 'static,
+        notification_tx: broadcast::Sender<JsonRpcNotification>,
+        request_tx: mpsc::UnboundedSender<JsonRpcRequest>,
+    ) -> Self {
+        Self::new_with_host_notifications(writer, reader, notification_tx, request_tx, None)
+    }
+
+    pub(crate) fn new_with_host_notifications(
+        writer: impl AsyncWrite + Unpin + Send + 'static,
+        reader: impl AsyncRead + Unpin + Send + 'static,
+        notification_tx: broadcast::Sender<JsonRpcNotification>,
+        request_tx: mpsc::UnboundedSender<JsonRpcRequest>,
+        host_notifications: Option<mpsc::UnboundedSender<JsonRpcNotification>>,
+    ) -> Self {
+        let (write_tx, write_rx) = mpsc::unbounded_channel::<WriteCommand>();
+        let connection_closed = CancellationToken::new();
+
+        let writer_span = tracing::error_span!("jsonrpc_write_loop");
+        let write_task = tokio::spawn(
+            Self::write_loop(writer, write_rx, connection_closed.clone()).instrument(writer_span),
+        );
+
+        let client = Self {
+            request_id: AtomicU64::new(1),
+            write_tx,
+            pending_requests: Arc::new(RwLock::new(HashMap::new())),
+            notification_tx,
+            request_tx,
+            request_handlers: Arc::new(RwLock::new(HashMap::new())),
+            connection_closed,
+            cancellable_requests: Arc::new(CancellableRequests::default()),
+            read_task: Mutex::new(None),
+            write_task: Mutex::new(Some(write_task)),
+        };
+
+        let pending_requests = client.pending_requests.clone();
+        let notification_tx_clone = client.notification_tx.clone();
+        let request_tx_clone = client.request_tx.clone();
+        let connection_closed = client.connection_closed.clone();
+        let cancellable_requests = client.cancellable_requests.clone();
+        let request_handlers = client.request_handlers.clone();
+        let write_tx = client.write_tx.clone();
+        let reader_span = tracing::error_span!("jsonrpc_read_loop");
+
+        let read_task = tokio::spawn(
+            async move {
+                Self::read_loop(
+                    reader,
+                    pending_requests,
+                    (notification_tx_clone, host_notifications),
+                    request_tx_clone,
+                    request_handlers,
+                    write_tx,
+                    (connection_closed, cancellable_requests),
+                )
+                .await;
+            }
+            .instrument(reader_span),
+        );
+        *client.read_task.lock() = Some(read_task);
+
+        client
+    }
+
+    pub(crate) fn force_close(&self) {
+        self.connection_closed.cancel();
+        self.cancellable_requests.clear();
+        let handlers = std::mem::take(&mut *self.request_handlers.write());
+        drop(handlers);
+        if let Some(task) = self.read_task.lock().take() {
+            task.abort();
+        }
+        self.close_writer();
+        self.pending_requests.write().clear();
+    }
+
+    /// Release stdin while continuing to drain the owned child's final stdout.
+    pub(crate) fn close_writer(&self) {
+        if let Some(task) = self.write_task.lock().take() {
+            task.abort();
+        }
+    }
+
+    pub(crate) fn connection_closed_token(&self) -> CancellationToken {
+        self.connection_closed.child_token()
+    }
+
+    pub(crate) fn register_request_handler(
+        &self,
+        method: &str,
+        handler: RequestHandler,
+    ) -> Result<(), Error> {
+        let mut handlers = self.request_handlers.write();
+        if method.is_empty() || self.connection_closed.is_cancelled() {
+            return Err(Error::with_message(
+                ErrorKind::InvalidConfig,
+                "Request handlers require a nonempty method and an open connection",
+            ));
+        }
+        if handlers.contains_key(method) {
+            return Err(Error::with_message(
+                ErrorKind::InvalidConfig,
+                format!("A request handler is already registered for {method}"),
+            ));
+        }
+        handlers.insert(method.to_owned(), handler);
+        Ok(())
+    }
+
+    /// Writer-actor task. Owns the `AsyncWrite`, drains the command queue,
+    /// and writes each frame atomically (header + body + flush) before
+    /// signaling the ack.
+    ///
+    /// Caller-side cancellation cannot interrupt a write in progress:
+    /// dropping the ack `oneshot::Receiver` does not cancel the in-flight
+    /// I/O. Once `WriteCommand` is enqueued the frame is committed to land
+    /// on the wire (or surface an `io::Error` to the ack receiver if the
+    /// transport is broken).
+    ///
+    /// Exits cleanly when all senders drop (channel closes), flushing any
+    /// final buffered bytes.
+    async fn write_loop(
+        mut writer: impl AsyncWrite + Unpin + Send + 'static,
+        mut rx: mpsc::UnboundedReceiver<WriteCommand>,
+        connection_closed: CancellationToken,
+    ) {
+        while let Some(WriteCommand { frame, ack }) = rx.recv().await {
+            let result = async {
+                writer.write_all(&frame).await?;
+                writer.flush().await?;
+                Ok::<_, std::io::Error>(())
+            }
+            .await;
+            // Caller may have dropped the ack receiver (e.g. their
+            // `await` was cancelled); that's fine — we still completed
+            // the write, which was the whole point.
+            match ack {
+                Some(ack) => {
+                    let _ = ack.send(result);
+                }
+                None => {
+                    if let Err(error) = result {
+                        error!(%error, "router rejection write failed; closing connection");
+                        connection_closed.cancel();
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn read_loop(
+        reader: impl AsyncRead + Unpin + Send,
+        pending_requests: Arc<RwLock<HashMap<u64, PendingRequest>>>,
+        notifications: (
+            broadcast::Sender<JsonRpcNotification>,
+            Option<mpsc::UnboundedSender<JsonRpcNotification>>,
+        ),
+        request_tx: mpsc::UnboundedSender<JsonRpcRequest>,
+        request_handlers: RequestHandlers,
+        write_tx: mpsc::UnboundedSender<WriteCommand>,
+        connection: (CancellationToken, Arc<CancellableRequests>),
+    ) {
+        let mut reader = BufReader::new(reader);
+        let (connection_closed, cancellable_requests) = connection;
+
+        loop {
+            let message = tokio::select! {
+                biased;
+                _ = connection_closed.cancelled() => break,
+                message = Self::read_message(&mut reader) => message,
+            };
+            match message {
+                Ok(Some(message)) => match message {
+                    JsonRpcMessage::Response(mut response) => {
+                        let id = response.id;
+                        let pending = pending_requests.write().remove(&id);
+                        if let Some(PendingRequest {
+                            sender,
+                            inline_callback,
+                        }) = pending
+                        {
+                            // Run the inline callback synchronously on the
+                            // read loop so any state it mutates (e.g.
+                            // registering a server-assigned session id with
+                            // the router) is visible before the loop reads
+                            // and dispatches the next message.
+                            if let Some(cb) = inline_callback
+                                && response.error.is_none()
+                            {
+                                let cb_outcome =
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        cb(&response)
+                                    }));
+                                match cb_outcome {
+                                    Ok(Ok(())) => {}
+                                    Ok(Err(error)) => {
+                                        response.result = None;
+                                        response.error = Some(JsonRpcError {
+                                            code: -32603,
+                                            message: error.to_string(),
+                                            data: None,
+                                        });
+                                    }
+                                    Err(panic) => {
+                                        let message = panic
+                                            .downcast_ref::<&'static str>()
+                                            .map(|s| (*s).to_string())
+                                            .or_else(|| panic.downcast_ref::<String>().cloned())
+                                            .unwrap_or_else(|| {
+                                                "inline response callback panicked".to_string()
+                                            });
+                                        response.result = None;
+                                        response.error = Some(JsonRpcError {
+                                            code: -32603,
+                                            message,
+                                            data: None,
+                                        });
+                                    }
+                                }
+                            }
+                            if sender.send(response).is_err() {
+                                warn!(request_id = %id, "failed to send response for request");
+                            }
+                        } else {
+                            warn!(request_id = %id, "received response for unknown request id");
+                        }
+                    }
+                    JsonRpcMessage::Notification(notification) => {
+                        if notification.method == "$/cancelRequest" {
+                            if let Some(id) = notification
+                                .params
+                                .as_ref()
+                                .and_then(|params| params.get("id"))
+                                .and_then(Value::as_u64)
+                            {
+                                cancellable_requests.cancel(id);
+                            } else {
+                                warn!("invalid numeric request cancellation");
+                            }
+                        }
+                        if matches!(
+                            notification.method.as_str(),
+                            "host.exited" | "host.sessionReleased"
+                        ) && let Some(hosts) = &notifications.1
+                        {
+                            let _ = hosts.send(notification.clone());
+                        }
+                        let _ = notifications.0.send(notification);
+                    }
+                    JsonRpcMessage::Request(request) => {
+                        if CancellableRequests::honors_cancellation(&request.method)
+                            && !cancellable_requests.register(request.id)
+                        {
+                            warn!(method = %request.method, "duplicate pending cancellable request ID");
+                            break;
+                        }
+                        let handler = request_handlers.read().get(&request.method).cloned();
+                        if let Some(handler) = handler {
+                            let write_tx = write_tx.clone();
+                            let closed = connection_closed.clone();
+                            // Internal handlers may register request state before
+                            // the reader dispatches a following notification.
+                            let response = handler(request.params.unwrap_or(Value::Null));
+                            tokio::spawn(async move {
+                                let result = tokio::select! {
+                                    biased;
+                                    _ = closed.cancelled() => return,
+                                    result = response => result,
+                                };
+                                let (result, error) = match result {
+                                    Ok(value) => (Some(value), None),
+                                    Err(error) => (
+                                        None,
+                                        Some(JsonRpcError {
+                                            code: error_codes::INTERNAL_ERROR,
+                                            message: error.to_string(),
+                                            data: None,
+                                        }),
+                                    ),
+                                };
+                                let response = JsonRpcResponse {
+                                    jsonrpc: "2.0".into(),
+                                    id: request.id,
+                                    result,
+                                    error,
+                                };
+                                if let Err(error) = Self::write_message(&write_tx, &response).await
+                                {
+                                    warn!(%error, "failed to send connection request response");
+                                }
+                            });
+                        } else if request_tx.send(request).is_err() {
+                            warn!("failed to forward JSON-RPC request, channel closed");
+                        }
+                    }
+                },
+                Ok(None) => {
+                    break;
+                }
+                Err(e) => {
+                    error!(error = %e, "error reading from CLI");
+                    break;
+                }
+            }
+        }
+        connection_closed.cancel();
+        cancellable_requests.clear();
+        // A handler may own the last Client clone, whose drop closes the RPC.
+        // Release the registry lock before dropping those captured values.
+        let handlers = std::mem::take(&mut *request_handlers.write());
+        drop(handlers);
+
+        // Drain in-flight requests so callers observe cancellation
+        // instead of hanging on a oneshot receiver.
+        let mut pending = pending_requests.write();
+        if !pending.is_empty() {
+            warn!(
+                count = pending.len(),
+                "draining pending requests after read loop exit"
+            );
+            pending.clear();
+        }
+    }
+
+    async fn read_message(
+        reader: &mut BufReader<impl AsyncRead + Unpin>,
+    ) -> Result<Option<JsonRpcMessage>, Error> {
+        let mut line = String::new();
+        let mut content_length = None;
+
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).await? == 0 {
+                return Ok(None);
+            }
+
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                break;
+            }
+
+            if let Some(value) = trimmed.strip_prefix(CONTENT_LENGTH_HEADER) {
+                content_length = Some(value.trim().parse::<usize>().map_err(|_| {
+                    Error::from(ErrorKind::Protocol(
+                        ProtocolErrorKind::InvalidContentLength(value.trim().to_string()),
+                    ))
+                })?);
+            }
+        }
+
+        let Some(length) = content_length else {
+            return Err(ErrorKind::Protocol(ProtocolErrorKind::MissingContentLength).into());
+        };
+
+        let mut body = vec![0u8; length];
+        reader.read_exact(&mut body).await?;
+
+        match serde_json::from_slice::<JsonRpcMessage>(&body) {
+            Ok(message) => Ok(Some(message)),
+            Err(error) => {
+                // Dropping an undecodable frame could leave its pending
+                // request waiting forever because this layer has no timeout.
+                match repair_lone_surrogates(&body)
+                    .and_then(|repaired| serde_json::from_slice::<JsonRpcMessage>(&repaired).ok())
+                {
+                    Some(message) => {
+                        warn!(
+                            error = %error,
+                            length,
+                            "recovered JSON-RPC frame containing unpaired UTF-16 surrogates"
+                        );
+                        Ok(Some(message))
+                    }
+                    None => Err(error.into()),
+                }
+            }
+        }
+    }
+
+    /// Send a JSON-RPC request and wait for the matching response.
+    ///
+    /// # Cancel safety
+    ///
+    /// **Cancel-safe.** The frame is committed to the wire via the writer
+    /// actor before this future yields; cancelling the await drops the
+    /// response oneshot but does not desync the transport. The pending-
+    /// requests map is cleaned up automatically (the `PendingGuard` drop
+    /// removes the entry, and the read loop's response handling tolerates
+    /// a missing entry).
+    #[allow(dead_code, reason = "public API exported via crate::JsonRpcClient")]
+    pub async fn send_request(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> Result<JsonRpcResponse, Error> {
+        self.send_request_with_inline_callback(method, params, None)
+            .await
+    }
+
+    /// Send a JSON-RPC request whose response is observed synchronously
+    /// by the read loop *before* it is delivered to the awaiter.
+    ///
+    /// The optional `inline_callback` runs on the JSON-RPC read task the
+    /// instant a successful response is parsed, and before the read loop
+    /// dispatches the next message. This is the only way to perform
+    /// client-side bookkeeping (for example, registering a server-
+    /// assigned session id with the router) that must be visible to any
+    /// notification or request that the server may emit on the same
+    /// connection immediately after the response.
+    ///
+    /// If the callback returns an error or panics, that error is
+    /// surfaced to the awaiter in place of the original response (the
+    /// response payload is discarded and an internal-error JSON-RPC
+    /// error is delivered instead). The error is never propagated back
+    /// to the server and does not crash the read loop.
+    pub(crate) fn send_request_with_inline_callback(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+        inline_callback: Option<InlineResponseCallback>,
+    ) -> impl std::future::Future<Output = Result<JsonRpcResponse, Error>> + Send + 'static {
+        let id = self.request_id.fetch_add(1, Ordering::SeqCst);
+        Self::send_owned_request(
+            self.pending_requests.clone(),
+            self.write_tx.clone(),
+            JsonRpcRequest::new(id, method, params),
+            inline_callback,
+        )
+    }
+
+    // Own the request bookkeeping, not the connection. A pending response may
+    // outlive its caller without preventing the last Client from closing I/O.
+    async fn send_owned_request(
+        pending_requests: Arc<RwLock<HashMap<u64, PendingRequest>>>,
+        write_tx: mpsc::UnboundedSender<WriteCommand>,
+        request: JsonRpcRequest,
+        inline_callback: Option<InlineResponseCallback>,
+    ) -> Result<JsonRpcResponse, Error> {
+        let request_start = Instant::now();
+        let id = request.id;
+        let method = request.method.as_str();
+        let (tx, rx) = oneshot::channel();
+        pending_requests.write().insert(
+            id,
+            PendingRequest {
+                sender: tx,
+                inline_callback,
+            },
+        );
+
+        // RAII guard that removes the pending entry if this future is
+        // dropped before the response arrives. Disarmed below before the
+        // success return so the read loop owns the cleanup on the happy
+        // path.
+        let mut guard = PendingGuard {
+            map: &pending_requests,
+            id,
+            armed: true,
+        };
+
+        // The PendingGuard's drop removes the entry on every error path
+        // and on cancellation; disarmed below before the success return so
+        // the read loop owns the cleanup on the happy path.
+        if let Err(error) = Self::write_message(&write_tx, &request).await {
+            warn!(
+                elapsed_ms = request_start.elapsed().as_millis(),
+                method = %method,
+                request_id = id,
+                status = "failed",
+                error = %error,
+                "JsonRpcClient::send_request JSON-RPC request finished"
+            );
+            return Err(error);
+        }
+
+        let response = match rx.await {
+            Ok(response) => response,
+            Err(_) => {
+                let error = ErrorKind::Protocol(ProtocolErrorKind::RequestCancelled).into();
+                warn!(
+                    elapsed_ms = request_start.elapsed().as_millis(),
+                    method = %method,
+                    request_id = id,
+                    status = "failed",
+                    error = %error,
+                    "JsonRpcClient::send_request JSON-RPC request finished"
+                );
+                return Err(error);
+            }
+        };
+        guard.disarm();
+        if let Some(error) = &response.error {
+            warn!(
+                elapsed_ms = request_start.elapsed().as_millis(),
+                method = %method,
+                request_id = id,
+                status = "failed",
+                code = error.code,
+                error = %remote_error_log_message(method, &error.message),
+                "JsonRpcClient::send_request JSON-RPC request finished"
+            );
+        } else {
+            debug!(
+                elapsed_ms = request_start.elapsed().as_millis(),
+                method = %method,
+                request_id = id,
+                status = "succeeded",
+                "JsonRpcClient::send_request JSON-RPC request finished"
+            );
+        }
+        Ok(response)
+    }
+
+    /// Write a Content-Length-framed JSON-RPC message to the transport.
+    ///
+    /// # Cancel safety
+    ///
+    /// **Cancel-safe.** Pre-serializes the body, enqueues it on the writer
+    /// actor's command channel, and awaits an ack. Caller cancellation
+    /// drops the ack receiver; the actor still completes the frame and
+    /// flushes. A partial frame can never appear on the wire.
+    pub async fn write<T: serde::Serialize>(&self, message: &T) -> Result<(), Error> {
+        Self::write_message(&self.write_tx, message).await
+    }
+
+    /// Commit a router rejection to the existing writer actor without retaining
+    /// a delivery waiter. The actor reports write failure and closes the connection.
+    pub(crate) fn enqueue_response(&self, response: &JsonRpcResponse) -> Result<(), Error> {
+        Self::enqueue_message(&self.write_tx, response, None)
+    }
+
+    async fn write_message<T: serde::Serialize>(
+        write_tx: &mpsc::UnboundedSender<WriteCommand>,
+        message: &T,
+    ) -> Result<(), Error> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        Self::enqueue_message(write_tx, message, Some(ack_tx))?;
+        match ack_rx.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(Error::from(e)),
+            Err(_) => Err(Error::from(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "writer actor dropped ack without responding",
+            ))),
+        }
+    }
+
+    fn enqueue_message<T: serde::Serialize>(
+        write_tx: &mpsc::UnboundedSender<WriteCommand>,
+        message: &T,
+        ack: Option<oneshot::Sender<Result<(), std::io::Error>>>,
+    ) -> Result<(), Error> {
+        let body = serde_json::to_vec(message)?;
+        let mut frame = Vec::with_capacity(CONTENT_LENGTH_HEADER.len() + 16 + body.len() + 4);
+        frame.extend_from_slice(CONTENT_LENGTH_HEADER.as_bytes());
+        frame.extend_from_slice(body.len().to_string().as_bytes());
+        frame.extend_from_slice(b"\r\n\r\n");
+        frame.extend_from_slice(&body);
+
+        write_tx.send(WriteCommand { frame, ack }).map_err(|_| {
+            Error::from(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "writer actor has shut down",
+            ))
+        })?;
+
+        Ok(())
+    }
+}
+
+impl Drop for JsonRpcClient {
+    fn drop(&mut self) {
+        self.force_close();
+    }
+}
+
+/// RAII guard that removes a pending-request entry from the map if the
+/// owning future is dropped before the response arrives. Disarmed on the
+/// happy path so the read loop's response handling owns the cleanup.
+struct PendingGuard<'a> {
+    map: &'a RwLock<HashMap<u64, PendingRequest>>,
+    id: u64,
+    armed: bool,
+}
+
+impl PendingGuard<'_> {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.map.write().remove(&self.id);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

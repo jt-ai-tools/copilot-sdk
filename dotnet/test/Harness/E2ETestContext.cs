@@ -2,43 +2,168 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
+using Microsoft.Extensions.Logging;
+using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using GitHub.Copilot.Rpc;
+using Environment = System.Environment;
 
-namespace GitHub.Copilot.SDK.Test.Harness;
+namespace GitHub.Copilot.Test.Harness;
 
 public sealed class E2ETestContext : IAsyncDisposable
 {
+    private const string DefaultGitHubToken = "fake-token-for-e2e-tests";
+    private static readonly TimeSpan s_gracefulClientStopTimeout = TimeSpan.FromSeconds(30);
+    private static readonly ConcurrentDictionary<string, Lazy<string>> s_preparedCliPaths = new(StringComparer.Ordinal);
+
     public string HomeDir { get; }
     public string WorkDir { get; }
-    public string ProxyUrl { get; }
+    public string ProxyUrl { get; private set; }
+    internal static bool UsesInProcessTransport => IsInProcess(null);
 
-    private readonly CapiProxy _proxy;
+    /// <summary>Optional logger injected by tests; applied to all clients created via <see cref="CreateClient"/>.</summary>
+    public ILogger? Logger { get; set; }
+    public bool DiagnosticsEnabled { get; set; }
+
+    private readonly ReplayProxy _proxy;
     private readonly string _repoRoot;
+    private readonly Lazy<string> _cliPath;
+    private readonly Lazy<string> _legacyCliPath;
+    private readonly object _clientsLock = new();
+    private readonly List<CopilotClient> _persistentClients = [];
+    private readonly List<CopilotClient> _transientClients = [];
+    private readonly List<CopilotSession> _testSessions = [];
+    private readonly Dictionary<CopilotClient, string> _extensionSdkPaths = [];
 
-    private E2ETestContext(string homeDir, string workDir, string proxyUrl, CapiProxy proxy, string repoRoot)
+    private E2ETestContext(string homeDir, string workDir, string proxyUrl, ReplayProxy proxy, string repoRoot)
     {
         HomeDir = homeDir;
         WorkDir = workDir;
         ProxyUrl = proxyUrl;
         _proxy = proxy;
         _repoRoot = repoRoot;
+        _cliPath = GetCachedCliPath(repoRoot, "--print-path");
+        _legacyCliPath = GetCachedCliPath(repoRoot, "--print-legacy-path");
     }
 
-    public static async Task<E2ETestContext> CreateAsync()
+    public static Task<E2ETestContext> CreateAsync() => CreateAsync(
+        new ReplayProxy(),
+        Path.Combine(Path.GetTempPath(), $"copilot-test-config-{Guid.NewGuid()}"),
+        Path.Combine(Path.GetTempPath(), $"copilot-test-work-{Guid.NewGuid()}"));
+
+    internal static async Task<E2ETestContext> CreateAsync(ReplayProxy proxy, string homeDir, string workDir)
     {
+        // A previous in-process context may have left this process's cwd inside a work
+        // directory that has since been deleted. getcwd() then fails, which breaks
+        // Process.Start below while it resolves the proxy executable. Repoint the cwd at
+        // the ambient value first; SetCurrentDirectory succeeds even if the old cwd is gone.
+        InProcessEnvIsolation.RestoreAmbientWorkingDirectory();
+
         var repoRoot = FindRepoRoot();
 
-        var homeDir = Path.Combine(Path.GetTempPath(), $"copilot-test-config-{Guid.NewGuid()}");
-        var workDir = Path.Combine(Path.GetTempPath(), $"copilot-test-work-{Guid.NewGuid()}");
+        // Resolve symlinks (e.g., macOS /var -> /private/var) so paths
+        // match what spawned subprocesses see when they resolve their cwd.
+        homeDir = ResolveSymlinks(homeDir);
+        workDir = ResolveSymlinks(workDir);
 
-        Directory.CreateDirectory(homeDir);
-        Directory.CreateDirectory(workDir);
+        var context = new E2ETestContext(homeDir, workDir, string.Empty, proxy, repoRoot);
+        try
+        {
+            Directory.CreateDirectory(homeDir);
+            Directory.CreateDirectory(workDir);
 
-        var proxy = new CapiProxy();
-        var proxyUrl = await proxy.StartAsync();
+            context.ProxyUrl = await proxy.StartAsync();
+            // Creating an in-process fixture applies this URL before its first
+            // test-specific configuration is posted, so early runtime requests need
+            // an empty but valid replay state.
+            await proxy.ConfigureAsync(
+                Path.Combine(workDir, "__unconfigured__.yaml"),
+                workDir,
+                "capi");
+            await proxy.SetCopilotUserByTokenAsync(DefaultGitHubToken, new CopilotUserConfig(
+                Login: "e2e-test-user",
+                CopilotPlan: "individual_pro",
+                Endpoints: new CopilotUserEndpoints(Api: context.ProxyUrl, Telemetry: context.ProxyUrl),
+                AnalyticsTrackingId: "e2e-test-tracking-id", Id: 12345));
 
-        return new E2ETestContext(homeDir, workDir, proxyUrl, proxy, repoRoot);
+            return context;
+        }
+        catch (Exception startupError)
+        {
+            try
+            {
+                await context.DisposeAsync();
+            }
+            catch (Exception cleanupError)
+            {
+                throw new AggregateException(startupError, cleanupError);
+            }
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Returns a canonical path with symlinks resolved in every directory
+    /// component. .NET has no built-in equivalent of POSIX <c>realpath</c>
+    /// that walks all parents, so we walk the components ourselves and use
+    /// <see cref="DirectoryInfo.ResolveLinkTarget(bool)"/> on each one.
+    /// On Windows, where the test temp paths don't traverse symlinks,
+    /// <see cref="Path.GetFullPath(string)"/> is sufficient.
+    /// </summary>
+    private static string ResolveSymlinks(string path)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return Path.GetFullPath(path);
+        }
+
+        try
+        {
+            var fullPath = Path.GetFullPath(path);
+            var root = Path.GetPathRoot(fullPath);
+            if (string.IsNullOrEmpty(root))
+            {
+                return fullPath;
+            }
+
+            var components = fullPath
+                .Substring(root.Length)
+                .Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);
+
+            var resolved = root;
+            foreach (var component in components)
+            {
+                resolved = Path.Join(resolved, component);
+                try
+                {
+                    var info = new DirectoryInfo(resolved);
+                    if (info.Exists && info.LinkTarget != null)
+                    {
+                        var target = info.ResolveLinkTarget(returnFinalTarget: true);
+                        if (target != null && !string.IsNullOrEmpty(target.FullName))
+                        {
+                            resolved = target.FullName;
+                        }
+                    }
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    // Component we can't inspect; keep what we have and continue.
+                }
+            }
+
+            return resolved;
+        }
+        catch (Exception ex) when (ex is IOException
+            or UnauthorizedAccessException
+            or ArgumentException
+            or NotSupportedException
+            or PathTooLongException)
+        {
+            return Path.GetFullPath(path);
+        }
     }
 
     private static string FindRepoRoot()
@@ -53,25 +178,70 @@ public sealed class E2ETestContext : IAsyncDisposable
         throw new InvalidOperationException("Could not find repository root");
     }
 
-    private static string GetCliPath(string repoRoot)
+    private string GetCliPath()
+        => _cliPath.Value;
+
+    public string GetLegacyCliPath()
+        => _legacyCliPath.Value;
+
+    private static Lazy<string> GetCachedCliPath(string repoRoot, string option)
+    {
+        var envPath = Environment.GetEnvironmentVariable("COPILOT_CLI_PATH");
+        var cacheKey = $"{repoRoot}\0{option}\0{envPath}";
+        return s_preparedCliPaths.GetOrAdd(
+            cacheKey,
+            _ => new Lazy<string>(
+                () => PrepareCliPath(repoRoot, option),
+                LazyThreadSafetyMode.ExecutionAndPublication));
+    }
+
+    private static string PrepareCliPath(string repoRoot, string option)
     {
         var envPath = Environment.GetEnvironmentVariable("COPILOT_CLI_PATH");
         if (!string.IsNullOrEmpty(envPath)) return envPath;
 
-        var path = Path.Combine(repoRoot, "nodejs/node_modules/@github/copilot/index.js");
-        if (!File.Exists(path))
-            throw new InvalidOperationException($"CLI not found at {path}. Run 'npm install' in the nodejs directory first.");
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "node",
+            WorkingDirectory = Path.Join(repoRoot, "nodejs"),
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            Arguments = $"node_modules/tsx/dist/cli.mjs scripts/prepare-runtime.ts {option}",
+        };
 
-        return path;
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Failed to start Node.js runtime preparation.");
+        var stdout = process.StandardOutput.ReadToEndAsync();
+        var stderr = process.StandardError.ReadToEndAsync();
+        process.WaitForExit();
+        var output = stdout.GetAwaiter().GetResult();
+        var lines = output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+        var cliPath = lines.Length == 0 ? string.Empty : lines[^1].Trim();
+        var error = stderr.GetAwaiter().GetResult().Trim();
+        if (process.ExitCode != 0 || string.IsNullOrEmpty(cliPath))
+            throw new InvalidOperationException(
+                $"Failed to prepare the pinned Copilot CLI: {error}");
+        if (!File.Exists(cliPath))
+            throw new InvalidOperationException(
+                $"Pinned Copilot CLI was not created at {cliPath}.");
+        return cliPath;
     }
 
-    public async Task ConfigureForTestAsync(string testFile, [CallerMemberName] string? testName = null)
+    public async Task ConfigureForTestAsync(
+        string testFile,
+        [CallerMemberName] string? testName = null,
+        bool replayOnly = false)
     {
         // Convert test method names to lowercase snake_case for snapshot filenames
         // to avoid case collisions on case-insensitive filesystems (macOS/Windows)
         var sanitizedName = Regex.Replace(testName!, @"[^a-zA-Z0-9]", "_").ToLowerInvariant();
         var snapshotPath = Path.Combine(_repoRoot, "test", "snapshots", testFile, $"{sanitizedName}.yaml");
-        await _proxy.ConfigureAsync(snapshotPath, WorkDir);
+        await _proxy.ConfigureAsync(
+            snapshotPath,
+            WorkDir,
+            E2ETestBackendConfiguration.Current.ToWireName(),
+            replayOnly);
     }
 
     public Task<List<ParsedHttpExchange>> GetExchangesAsync()
@@ -79,38 +249,495 @@ public sealed class E2ETestContext : IAsyncDisposable
         return _proxy.GetExchangesAsync();
     }
 
-    public IReadOnlyDictionary<string, string> GetEnvironment()
+    public Task SetCopilotUserByTokenAsync(string token, CopilotUserConfig response)
+    {
+        return _proxy.SetCopilotUserByTokenAsync(token, response);
+    }
+
+    public Dictionary<string, string> GetEnvironment()
     {
         var env = Environment.GetEnvironmentVariables()
             .Cast<System.Collections.DictionaryEntry>()
             .ToDictionary(e => (string)e.Key, e => e.Value?.ToString());
 
         env["COPILOT_API_URL"] = ProxyUrl;
+        // Route GitHub API calls (e.g. the MCP registry policy check) to the
+        // replay proxy so MCP enablement stays hermetic. Without this the CLI
+        // reaches the real api.github.com, which is slow/unreachable on macOS
+        // CI runners and makes MCP servers time out before reaching connected.
+        env["COPILOT_DEBUG_GITHUB_API_URL"] = ProxyUrl;
+        env["COPILOT_HOME"] = HomeDir;
+        env["GH_CONFIG_DIR"] = HomeDir;
         env["XDG_CONFIG_HOME"] = HomeDir;
         env["XDG_STATE_HOME"] = HomeDir;
+        env["COPILOT_MCP_APPS"] = "true";
+        env["MCP_APPS"] = "true";
+        if (!string.IsNullOrEmpty(_proxy.ConnectProxyUrl) && !string.IsNullOrEmpty(_proxy.CaFilePath))
+        {
+            const string noProxy = "127.0.0.1,localhost,::1";
+            env["HTTP_PROXY"] = _proxy.ConnectProxyUrl;
+            env["HTTPS_PROXY"] = _proxy.ConnectProxyUrl;
+            env["http_proxy"] = _proxy.ConnectProxyUrl;
+            env["https_proxy"] = _proxy.ConnectProxyUrl;
+            env["NO_PROXY"] = noProxy;
+            env["no_proxy"] = noProxy;
+            env["NODE_EXTRA_CA_CERTS"] = _proxy.CaFilePath;
+            env["SSL_CERT_FILE"] = _proxy.CaFilePath;
+            env["REQUESTS_CA_BUNDLE"] = _proxy.CaFilePath;
+            env["CURL_CA_BUNDLE"] = _proxy.CaFilePath;
+            env["GIT_SSL_CAINFO"] = _proxy.CaFilePath;
+            env["GH_TOKEN"] = "";
+            env["GITHUB_TOKEN"] = "";
+            env["GH_ENTERPRISE_TOKEN"] = "";
+            env["GITHUB_ENTERPRISE_TOKEN"] = "";
+        }
+
+        env["GITHUB_TOKEN"] = env["GH_TOKEN"] = DefaultGitHubToken;
+
+        // Disable HMAC auth for E2E runs. CI sets COPILOT_HMAC_KEY at the job
+        // level as an ambient credential, but the replay snapshots are captured
+        // against Bearer/OAuth (SDK-token) requests. In stdio the SDK token
+        // outranks HMAC so this is a no-op, but in-process auth resolution runs
+        // host-side in this process and would otherwise pick HMAC (which ranks
+        // above the GitHub token) and fail provider.getEndpoint. An empty value
+        // disables the method (runtime filters out empty HMAC keys).
+        env["COPILOT_HMAC_KEY"] = "";
+        env["CAPI_HMAC_KEY"] = "";
+        if (DiagnosticsEnabled)
+        {
+            env["RUST_LOG"] = "error,sdk_diagnostics=debug";
+        }
 
         return env!;
     }
 
-    public CopilotClient CreateClient(bool useStdio = true)
+    private static string? GetEffectiveGitHubTokenForTests()
     {
-        return new(new CopilotClientOptions
+        return Environment.GetEnvironmentVariable("GITHUB_ACTIONS") == "true"
+            ? DefaultGitHubToken
+            : Environment.GetEnvironmentVariable("GITHUB_TOKEN");
+    }
+
+    public CopilotClient CreateClient(
+        CopilotClientOptions? options = null,
+        bool autoInjectGitHubToken = true,
+        bool persistent = false,
+        IReadOnlyDictionary<string, string>? environment = null)
+    {
+        options ??= new CopilotClientOptions();
+
+        options.Logger ??= Logger;
+        if (DiagnosticsEnabled)
         {
-            Cwd = WorkDir,
-            CliPath = GetCliPath(_repoRoot),
-            Environment = GetEnvironment(),
-            UseStdio = useStdio,
-            GitHubToken = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("GITHUB_ACTIONS")) ? "fake-token-for-e2e-tests" : null,
-        });
+            options.LogLevel = CopilotLogLevel.Debug;
+        }
+
+        // Resolve the working directory the worker should run in. Child-process and
+        // URI transports take it as a per-client option; the in-process transport
+        // rejects a per-client WorkingDirectory (the native host spawns the worker
+        // without a cwd parameter), so — mirroring the Node/Rust harnesses — we point
+        // THIS process's cwd at the desired directory before the worker spawns and
+        // clear the per-client option. InProcessEnvIsolationAttribute.After restores
+        // the cwd after the test.
+        var desiredWorkingDirectory = options.WorkingDirectory ?? WorkDir;
+
+        // Tests must supply environment via the 'environment' parameter, which the
+        // harness routes to the right place per transport (the connection for
+        // child-process transports, the host process for in-process). Setting
+        // options.Environment directly bypasses that routing and is unsupported
+        // in-process, so reject it here.
+        if (options.Environment is not null)
+        {
+            throw new ArgumentException(
+                "Do not set options.Environment in E2E tests; pass the 'environment' parameter to CreateClient instead.",
+                nameof(options));
+        }
+
+        // The full environment the client runs with: harness defaults (proxy
+        // redirect, isolated home, cleared HMAC/tokens, etc.) unless the test
+        // supplied a complete replacement.
+        var env = environment is not null
+            ? environment.ToDictionary(kvp => kvp.Key, kvp => kvp.Value)
+            : GetEnvironment();
+        var extensionSdkPath = Environment.GetEnvironmentVariable("COPILOT_EXTENSION_SDK_PATH");
+        var extensionsEnabled = env.TryGetValue("COPILOT_CLI_ENABLED_FEATURE_FLAGS", out var featureFlags)
+            && featureFlags.Split(',')
+                .Select(flag => flag.Trim())
+                .Where(flag => flag.Length > 0)
+                .Contains("EXTENSIONS", StringComparer.OrdinalIgnoreCase);
+        if (extensionsEnabled && !string.IsNullOrEmpty(extensionSdkPath))
+        {
+            options.ExtensionLaunchProvider ??= new TestExtensionLaunchProvider(Path.GetDirectoryName(extensionSdkPath)!);
+        }
+
+        // When the test doesn't pin a transport, leave Connection null so
+        // CopilotClient honors COPILOT_SDK_DEFAULT_CONNECTION (stdio by default,
+        // or in-process); the CI matrix uses this to run the suite under both.
+        // Tests that need a specific transport set options.Connection directly.
+        switch (options.Connection)
+        {
+            case null when !IsInProcess(null):
+                // No explicit connection and not the in-process default: the
+                // default resolves to stdio, so materialize it here so the
+                // environment can be attached to the connection below.
+                options.Connection = RuntimeConnection.ForStdio(path: GetCliPath());
+                break;
+            case null:
+                // In-process default: leave Connection unset so CopilotClient's
+                // ResolveDefaultConnection honors COPILOT_SDK_DEFAULT_CONNECTION.
+                break;
+            case ChildProcessRuntimeConnection child when child.Path is null:
+                child.Path = GetCliPath();
+                break;
+        }
+
+        if (IsInProcess(options.Connection))
+        {
+            options.WorkingDirectory = null;
+            ApplyInProcessEnvironment(env, desiredWorkingDirectory);
+        }
+        else if (options.Connection is ChildProcessRuntimeConnection child)
+        {
+            // Child-process transport: hand the environment to the spawned child
+            // via the connection, where per-client environment is coherent.
+            child.Environment = env;
+            options.WorkingDirectory = desiredWorkingDirectory;
+        }
+        else
+        {
+            // URI / existing-runtime transport: per-client WorkingDirectory applies normally.
+            options.WorkingDirectory = desiredWorkingDirectory;
+        }
+
+        // Auto-inject auth token unless connecting to an existing runtime via URI.
+        var isExistingRuntime = options.Connection is UriRuntimeConnection;
+        if (autoInjectGitHubToken
+            && string.IsNullOrEmpty(options.GitHubToken)
+            && !isExistingRuntime)
+        {
+            options.GitHubToken = GetEffectiveGitHubTokenForTests();
+        }
+
+        var client = new CopilotClient(options);
+        lock (_clientsLock)
+        {
+            if (extensionsEnabled && !string.IsNullOrEmpty(extensionSdkPath))
+            {
+                _extensionSdkPaths[client] = extensionSdkPath;
+            }
+            if (persistent)
+            {
+                _persistentClients.Add(client);
+            }
+            else
+            {
+                _transientClients.Add(client);
+            }
+        }
+        return client;
+    }
+
+    public async Task<CopilotSession> CreateSessionAsync(
+        CopilotClient client,
+        SessionConfig? config = null)
+    {
+        config ??= new SessionConfig();
+        ApplyExtensionSdkPath(client, config);
+        E2ETestBackendConfiguration.Current.ApplyProvider(config, ProxyUrl);
+        var session = await client.CreateSessionAsync(config);
+        lock (_clientsLock)
+        {
+            _testSessions.Add(session);
+        }
+        return session;
+    }
+
+    public async Task<CopilotSession> ResumeSessionAsync(
+        CopilotClient client,
+        string sessionId,
+        ResumeSessionConfig? config = null)
+    {
+        config ??= new ResumeSessionConfig();
+        ApplyExtensionSdkPath(client, config);
+        E2ETestBackendConfiguration.Current.ApplyProvider(config, ProxyUrl);
+        var session = await client.ResumeSessionAsync(sessionId, config);
+        lock (_clientsLock)
+        {
+            _testSessions.Add(session);
+        }
+        return session;
+    }
+
+    private void ApplyExtensionSdkPath(CopilotClient client, SessionConfigBase config)
+    {
+        if (!string.IsNullOrEmpty(config.ExtensionSdkPath))
+        {
+            return;
+        }
+        lock (_clientsLock)
+        {
+            if (_extensionSdkPaths.TryGetValue(client, out var extensionSdkPath))
+            {
+                config.ExtensionSdkPath = extensionSdkPath;
+            }
+        }
+    }
+
+    private sealed class TestExtensionLaunchProvider(string cliDistDirectory) : IExtensionLaunchProviderHandler
+    {
+        public Task<ExtensionLaunchProviderResolveResult> ResolveAsync(
+            ExtensionLaunchProviderResolveRequest request,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new ExtensionLaunchProviderResolveResult
+            {
+                Launch = new ExtensionLaunchProfile
+                {
+                    Executable = "node",
+                    Args = [Path.Join(cliDistDirectory, "preloads", "extension_bootstrap.mjs")],
+                    Env = new Dictionary<string, string>
+                    {
+                        ["COPILOT_CLI_DIST_DIR"] = cliDistDirectory,
+                        ["EXTENSION_PATH"] = request.ModulePath,
+                    },
+                },
+            });
+    }
+
+    internal void PrepareForTest()
+    {
+        if (UsesInProcessTransport)
+        {
+            ApplyInProcessEnvironment(GetEnvironment(), WorkDir);
+        }
+    }
+
+    private static void ApplyInProcessEnvironment(IReadOnlyDictionary<string, string> environment, string workingDirectory)
+    {
+        // Runtime code runs host-side in this process and reads its ambient environment,
+        // so restore the per-test redirects and isolated home after the assembly-level
+        // isolation attribute reset them at the end of the preceding test.
+        foreach (var (name, value) in environment)
+        {
+            InProcessEnvIsolation.Apply(name, value);
+        }
+
+        // The worker inherits the host process cwd because the native host has no
+        // per-client working-directory parameter.
+        InProcessEnvIsolation.SetWorkingDirectory(workingDirectory);
+    }
+
+    public void UntrackClient(CopilotClient client)
+    {
+        lock (_clientsLock)
+        {
+            _persistentClients.Remove(client);
+            _transientClients.Remove(client);
+        }
+    }
+
+    public async Task CleanupAfterTestAsync()
+    {
+        // Per-test cleanup only stops clients created for a specific test.
+        // The shared persistent client and temp directories are cleaned when the fixture is disposed.
+        var errors = new List<Exception>();
+        CopilotSession[] testSessions;
+        CopilotClient[] transientClients;
+
+        lock (_clientsLock)
+        {
+            testSessions = [.. _testSessions];
+            _testSessions.Clear();
+            transientClients = [.. _transientClients];
+            _transientClients.Clear();
+        }
+
+        foreach (var session in testSessions)
+        {
+            try
+            {
+                await session.DisposeAsync();
+            }
+            catch (Exception ex) when (IsTransientCleanupException(ex))
+            {
+                errors.Add(ex);
+            }
+        }
+
+        foreach (var client in transientClients)
+        {
+            try
+            {
+                await StopClientForCleanupAsync(client);
+            }
+            catch (Exception ex) when (IsTransientCleanupException(ex))
+            {
+                errors.Add(ex);
+            }
+        }
+
+        if (errors.Count == 1)
+        {
+            throw errors[0];
+        }
+        if (errors.Count > 1)
+        {
+            throw new AggregateException(errors);
+        }
     }
 
     public async ValueTask DisposeAsync()
     {
+        var errors = new List<Exception>();
+        CopilotSession[] testSessions;
+        CopilotClient[] clients;
+
+        lock (_clientsLock)
+        {
+            testSessions = [.. _testSessions];
+            _testSessions.Clear();
+            clients = [.. _persistentClients.Concat(_transientClients)];
+            _persistentClients.Clear();
+            _transientClients.Clear();
+        }
+
+        foreach (var session in testSessions)
+        {
+            try
+            {
+                await session.DisposeAsync();
+            }
+            catch (Exception ex) when (IsTransientCleanupException(ex))
+            {
+                errors.Add(ex);
+            }
+        }
+
+        foreach (var client in clients)
+        {
+            try
+            {
+                await StopClientForCleanupAsync(client);
+            }
+            catch (Exception ex) when (IsTransientCleanupException(ex))
+            {
+                errors.Add(ex);
+            }
+        }
+
         // Skip writing snapshots in CI to avoid corrupting them on test failures
         var isCI = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("GITHUB_ACTIONS"));
-        await _proxy.StopAsync(skipWritingCache: isCI);
+        try { await _proxy.StopAsync(skipWritingCache: isCI); } catch (Exception ex) when (IsTransientCleanupException(ex)) { errors.Add(ex); }
 
-        try { if (Directory.Exists(HomeDir)) Directory.Delete(HomeDir, true); } catch { }
-        try { if (Directory.Exists(WorkDir)) Directory.Delete(WorkDir, true); } catch { }
+        // The in-process worker inherits this process's cwd, so ApplyInProcessEnvironment
+        // may have pointed it at WorkDir. The assembly-level isolation attribute only
+        // restores it around tests that actually execute, so a statically skipped test
+        // can leave the cwd inside a directory this method is about to delete. Every
+        // later Process.Start would then fail resolving its executable because getcwd()
+        // returns ENOENT. Repoint the cwd before deleting anything.
+        InProcessEnvIsolation.RestoreAmbientWorkingDirectory();
+
+        try { await DeleteDirectoryAsync(HomeDir); } catch (Exception ex) when (IsTransientCleanupException(ex)) { errors.Add(ex); }
+        try { await DeleteDirectoryAsync(WorkDir); } catch (Exception ex) when (IsTransientCleanupException(ex)) { errors.Add(ex); }
+
+        if (errors.Count == 1)
+        {
+            throw errors[0];
+        }
+        if (errors.Count > 1)
+        {
+            throw new AggregateException(errors);
+        }
     }
+
+    private static async Task DeleteDirectoryAsync(string path)
+    {
+        const int maxAttempts = 40;
+        var delay = TimeSpan.FromMilliseconds(50);
+        var lastException = (Exception?)null;
+
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            if (!Directory.Exists(path))
+            {
+                return;
+            }
+
+            try
+            {
+                Directory.Delete(path, recursive: true);
+                return;
+            }
+            catch (Exception ex) when (IsTransientCleanupException(ex))
+            {
+                lastException = ex;
+                if (attempt == maxAttempts)
+                {
+                    break;
+                }
+
+                await Task.Delay(delay);
+                delay = TimeSpan.FromMilliseconds(Math.Min(delay.TotalMilliseconds * 2, 250));
+            }
+        }
+
+        if (Directory.Exists(path))
+        {
+            throw new IOException($"Failed to delete directory '{path}' after {maxAttempts} attempts.", lastException);
+        }
+    }
+
+    /// <summary>
+    /// Determines whether the resolved transport is the in-process (FFI) host,
+    /// mirroring <see cref="CopilotClient"/>'s own default-connection resolution:
+    /// an explicit <see cref="InProcessRuntimeConnection"/>, or (when no connection
+    /// is given) the COPILOT_SDK_DEFAULT_CONNECTION=inprocess default.
+    /// </summary>
+    private static bool IsInProcess(RuntimeConnection? connection)
+    {
+        if (connection is InProcessRuntimeConnection)
+        {
+            return true;
+        }
+        if (connection is null)
+        {
+            return string.Equals(
+                Environment.GetEnvironmentVariable("COPILOT_SDK_DEFAULT_CONNECTION"),
+                "inprocess",
+                StringComparison.OrdinalIgnoreCase);
+        }
+        return false;
+    }
+
+    private static async Task StopClientForCleanupAsync(CopilotClient client)
+    {
+        var isInProcess = string.Equals(
+            Environment.GetEnvironmentVariable("COPILOT_SDK_DEFAULT_CONNECTION"),
+            "inprocess",
+            StringComparison.OrdinalIgnoreCase);
+        if (isInProcess)
+        {
+            var gracefulStop = client.StopAsync();
+            try
+            {
+                await gracefulStop.WaitAsync(s_gracefulClientStopTimeout);
+            }
+            catch (TimeoutException)
+            {
+                Console.Error.WriteLine(
+                    $"Graceful in-process client cleanup exceeded {s_gracefulClientStopTimeout}; forcing shutdown.");
+                await client.ForceStopAsync();
+
+                // Disposing the connection completes any session.detach RPC that
+                // blocked graceful cleanup. Observe that task before continuing.
+                await gracefulStop.WaitAsync(s_gracefulClientStopTimeout);
+            }
+        }
+        else
+        {
+            await client.ForceStopAsync();
+        }
+    }
+
+    private static bool IsTransientCleanupException(Exception exception)
+        => exception is IOException or UnauthorizedAccessException;
 }

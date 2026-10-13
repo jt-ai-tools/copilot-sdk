@@ -1,0 +1,36 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *--------------------------------------------------------------------------------------------*/
+
+// AUTO-GENERATED FILE - DO NOT EDIT
+// Generated from: api.schema.json
+
+package com.github.copilot.generated.rpc;
+
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.github.copilot.CopilotExperimental;
+import javax.annotation.processing.Generated;
+
+/**
+ * OAuth authorization URL the caller should open, or empty when cached tokens already authenticated the server.
+ *
+ * @apiNote This method is experimental and may change in a future version.
+ * @since 1.0.0
+ */
+@CopilotExperimental
+@javax.annotation.processing.Generated("copilot-sdk-codegen")
+@JsonInclude(JsonInclude.Include.NON_NULL)
+@JsonIgnoreProperties(ignoreUnknown = true)
+public record SessionMcpOauthLoginResult(
+    /** Runtime-issued owned flow identity; never a server name or installation operation ID. */
+    @JsonProperty("loginId") String loginId,
+    /** Explicit outcome for owned sign-in. Manual callers retain their legacy response shape. */
+    @JsonProperty("status") McpOwnedOauthLoginStatus status,
+    /** URL the caller should open in a browser to complete OAuth. Omitted when cached tokens were still valid and no browser interaction was needed — the server is already reconnected in that case. For the default loopback flow, the runtime starts its listener before returning. With redirectUri, the host receives the callback and completes it through session.mcp.oauth.complete. The runtime continues the flow in the background and signals completion via session.mcp_server_status_changed. */
+    @JsonProperty("authorizationUrl") String authorizationUrl,
+    /** Opaque authorization identifier returned only for a host-managed redirect URI. The runtime also sends it as the OAuth state value, so the callback endpoint can read state and pass it with the full callback URL to session.mcp.oauth.complete. */
+    @JsonProperty("authorizationId") String authorizationId
+) {
+}

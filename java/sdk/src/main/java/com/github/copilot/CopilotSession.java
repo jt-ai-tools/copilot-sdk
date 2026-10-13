@@ -1,0 +1,3015 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *--------------------------------------------------------------------------------------------*/
+
+package com.github.copilot;
+
+import java.io.Closeable;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.github.copilot.generated.AssistantMessageEvent;
+import com.github.copilot.generated.ExternalToolCompletedEvent;
+import com.github.copilot.generated.rpc.SessionCommandsHandlePendingCommandParams;
+import com.github.copilot.generated.rpc.SessionLogParams;
+import com.github.copilot.generated.rpc.SessionLogLevel;
+import com.github.copilot.generated.rpc.SessionMcpOauthHandlePendingRequestParams;
+import com.github.copilot.generated.rpc.ModelCapabilitiesOverride;
+import com.github.copilot.generated.rpc.ModelCapabilitiesOverrideLimits;
+import com.github.copilot.generated.rpc.ModelCapabilitiesOverrideSupports;
+import com.github.copilot.generated.rpc.SessionModelSwitchAutoTierParams;
+import com.github.copilot.generated.rpc.SessionModelSwitchAutoTierResult;
+import com.github.copilot.generated.rpc.SessionModelSwitchToParams;
+import com.github.copilot.generated.rpc.SessionPermissionsHandlePendingPermissionRequestParams;
+import com.github.copilot.generated.rpc.SessionRpc;
+import com.github.copilot.generated.rpc.SessionToolsHandlePendingToolCallParams;
+import com.github.copilot.generated.rpc.SessionToolsSetParams;
+import com.github.copilot.generated.rpc.SessionUiElicitationParams;
+import com.github.copilot.generated.rpc.SessionUiHandlePendingElicitationParams;
+import com.github.copilot.generated.rpc.UIElicitationResponse;
+import com.github.copilot.generated.rpc.UIElicitationResponseAction;
+import com.github.copilot.generated.rpc.UIElicitationSchema;
+import com.github.copilot.generated.CapabilitiesChangedEvent;
+import com.github.copilot.generated.CommandExecuteEvent;
+import com.github.copilot.generated.ElicitationRequestedEvent;
+import com.github.copilot.generated.ExternalToolRequestedEvent;
+import com.github.copilot.generated.McpOauthRequiredEvent;
+import com.github.copilot.generated.PermissionRequestedEvent;
+import com.github.copilot.generated.SessionCanvasClosedEvent;
+import com.github.copilot.generated.SessionCanvasOpenedEvent;
+import com.github.copilot.generated.SessionErrorEvent;
+import com.github.copilot.generated.SessionEvent;
+import com.github.copilot.generated.SessionIdleEvent;
+import com.github.copilot.generated.SessionMode;
+import com.github.copilot.generated.rpc.OpenCanvasInstance;
+import com.github.copilot.rpc.AgentInfo;
+import com.github.copilot.rpc.AutoModeSwitchHandler;
+import com.github.copilot.rpc.AutoModeSwitchInvocation;
+import com.github.copilot.rpc.AutoModeSwitchRequest;
+import com.github.copilot.rpc.AutoModeSwitchResponse;
+import com.github.copilot.rpc.CommandContext;
+import com.github.copilot.rpc.CommandDefinition;
+import com.github.copilot.rpc.CommandHandler;
+import com.github.copilot.rpc.ElicitationContext;
+import com.github.copilot.rpc.ElicitationHandler;
+import com.github.copilot.rpc.ElicitationParams;
+import com.github.copilot.rpc.ElicitationResult;
+import com.github.copilot.rpc.ElicitationResultAction;
+import com.github.copilot.rpc.ExitPlanModeHandler;
+import com.github.copilot.rpc.ExitPlanModeInvocation;
+import com.github.copilot.rpc.ExitPlanModeRequest;
+import com.github.copilot.rpc.ExitPlanModeResult;
+import com.github.copilot.rpc.ElicitationSchema;
+import com.github.copilot.rpc.BearerTokenProvider;
+import com.github.copilot.rpc.GetMessagesResponse;
+import com.github.copilot.rpc.AgentStopHookInput;
+import com.github.copilot.rpc.HookInvocation;
+import com.github.copilot.rpc.InputOptions;
+import com.github.copilot.rpc.MessageOptions;
+import com.github.copilot.rpc.McpAuthHandler;
+import com.github.copilot.rpc.McpAuthInvocation;
+import com.github.copilot.rpc.McpAuthRequest;
+import com.github.copilot.rpc.McpAuthResult;
+import com.github.copilot.rpc.PermissionHandler;
+import com.github.copilot.rpc.PermissionInvocation;
+import com.github.copilot.rpc.PermissionRequest;
+import com.github.copilot.rpc.PermissionRequestResult;
+import com.github.copilot.rpc.PermissionRequestResultKind;
+import com.github.copilot.rpc.PostToolUseHookInput;
+import com.github.copilot.rpc.PostToolUseFailureHookInput;
+import com.github.copilot.rpc.PreMcpToolCallHookInput;
+import com.github.copilot.rpc.PreToolUseHookInput;
+import com.github.copilot.rpc.SendMessageRequest;
+import com.github.copilot.rpc.SendMessageResponse;
+import com.github.copilot.rpc.SessionCapabilities;
+import com.github.copilot.rpc.SessionEndHookInput;
+import com.github.copilot.rpc.SessionHooks;
+import com.github.copilot.rpc.SessionStartHookInput;
+import com.github.copilot.rpc.SessionUiApi;
+import com.github.copilot.rpc.SessionUiCapabilities;
+import com.github.copilot.rpc.SubagentStartHookInput;
+import com.github.copilot.rpc.SubagentStopHookInput;
+import com.github.copilot.rpc.ToolDefinition;
+import com.github.copilot.rpc.ToolResultObject;
+import com.github.copilot.rpc.TranscriptRecoveryReport;
+import com.github.copilot.rpc.UserInputHandler;
+import com.github.copilot.rpc.UserInputInvocation;
+import com.github.copilot.rpc.UserInputRequest;
+import com.github.copilot.rpc.UserInputResponse;
+import com.github.copilot.rpc.UserPromptSubmittedHookInput;
+import com.github.copilot.rpc.UserPromptTransformedHookInput;
+
+/**
+ * Represents a single conversation session with the Copilot CLI.
+ * <p>
+ * A session maintains conversation state, handles events, and manages tool
+ * execution. Sessions are created via {@link CopilotClient#createSession} or
+ * resumed via {@link CopilotClient#resumeSession}.
+ * <p>
+ * {@code CopilotSession} implements {@link AutoCloseable}. Use the
+ * try-with-resources pattern for automatic cleanup, or call {@link #close()}
+ * explicitly. Closing a session releases in-memory resources but preserves
+ * session data on disk — the conversation can be resumed later via
+ * {@link CopilotClient#resumeSession}. To permanently delete session data, use
+ * {@link CopilotClient#deleteSession}.
+ *
+ * <h2>Example Usage</h2>
+ *
+ * <pre>{@code
+ * // Create a session with a permission handler (required)
+ * var session = client
+ * 		.createSession(new SessionConfig().setOnPermissionRequest(PermissionHandler.APPROVE_ALL).setModel("gpt-5"))
+ * 		.get();
+ *
+ * // Register type-safe event handlers
+ * session.on(AssistantMessageEvent.class, msg -> {
+ * 	System.out.println(msg.getData().content());
+ * });
+ * session.on(SessionIdleEvent.class, idle -> {
+ * 	System.out.println("Session is idle");
+ * });
+ *
+ * // Send messages
+ * session.sendAndWait(new MessageOptions().setPrompt("Hello!")).get();
+ *
+ * // Clean up
+ * session.close();
+ * }</pre>
+ *
+ * @see CopilotClient#createSession(com.github.copilot.rpc.SessionConfig)
+ * @see CopilotClient#resumeSession(String,
+ *      com.github.copilot.rpc.ResumeSessionConfig)
+ * @see SessionEvent
+ * @since 1.0.0
+ */
+public final class CopilotSession implements AutoCloseable {
+
+    private static final Logger LOG = Logger.getLogger(CopilotSession.class.getName());
+    private static final ObjectMapper MAPPER = JsonRpcClient.getObjectMapper();
+    private final java.util.Set<CompletableFuture<?>> structuredWaits = ConcurrentHashMap.newKeySet();
+    private final Map<CompletableFuture<AssistantMessageEvent>, CompletableFuture<AssistantMessageEvent>> plainWaits = new ConcurrentHashMap<>();
+
+    /**
+     * Fixed name of the runtime's built-in tool-search tool. A client can replace
+     * its behavior by registering a tool with this exact name and
+     * {@code overridesBuiltInTool} set to {@code true}.
+     */
+    private static final String TOOL_SEARCH_TOOL_NAME = "tool_search_tool";
+
+    /**
+     * The current active session ID. Initialized to the pre-generated value and may
+     * be updated after session.create / session.resume if the server returns a
+     * different ID (e.g. when working against a v2 CLI that ignores the
+     * client-supplied sessionId).
+     */
+    private volatile String sessionId;
+    private volatile String workspacePath;
+    private volatile TranscriptRecoveryReport transcriptRecovery;
+    private volatile SessionCapabilities capabilities = new SessionCapabilities();
+    private final Object openCanvasesLock = new Object();
+    private final List<OpenCanvasInstance> openCanvases = new ArrayList<>();
+    private final SessionUiApi ui;
+    private final JsonRpcClient rpc;
+    private volatile SessionRpc sessionRpc;
+    private final Set<EventSubscription> eventHandlers = new CopyOnWriteArraySet<>();
+    private final AtomicReference<Map<String, ToolDefinition>> toolHandlers = new AtomicReference<>(Map.of());
+    private final Object setToolsLock = new Object();
+    private CompletableFuture<Void> setToolsTail = CompletableFuture.completedFuture(null);
+    private final Map<String, PendingExternalTool> pendingExternalTools = new ConcurrentHashMap<>();
+    private boolean externalToolsClosed;
+    private final Map<String, CommandHandler> commandHandlers = new ConcurrentHashMap<>();
+    private final Map<String, BearerTokenProvider> bearerTokenProviders = new ConcurrentHashMap<>();
+    private final AtomicReference<PermissionHandler> permissionHandler = new AtomicReference<>();
+    private volatile boolean managedSettingsEnabled;
+    private final AtomicReference<McpAuthHandler> mcpAuthHandler = new AtomicReference<>();
+    private final AtomicReference<UserInputHandler> userInputHandler = new AtomicReference<>();
+    private final AtomicReference<ElicitationHandler> elicitationHandler = new AtomicReference<>();
+    private final AtomicReference<ExitPlanModeHandler> exitPlanModeHandler = new AtomicReference<>();
+    private final AtomicReference<AutoModeSwitchHandler> autoModeSwitchHandler = new AtomicReference<>();
+    private final AtomicReference<SessionHooks> hooksHandler = new AtomicReference<>();
+    private final AtomicReference<SkillProvider> skillProvider = new AtomicReference<>();
+    private volatile EventErrorHandler eventErrorHandler;
+    private volatile EventErrorPolicy eventErrorPolicy = EventErrorPolicy.PROPAGATE_AND_LOG_ERRORS;
+    private volatile Map<String, java.util.function.Function<String, CompletableFuture<String>>> transformCallbacks;
+    private final ScheduledExecutorService timeoutScheduler;
+    private volatile Executor executor;
+    private volatile GitHubTokenProviderRegistry.Registration gitHubTokenProviderRegistration;
+
+    /** Tracks whether this session instance has been closed or force-stopped. */
+    private volatile boolean isTerminated = false;
+    private volatile boolean callbacksRetired = false;
+
+    private static final class EventSubscription {
+        private final AtomicReference<Consumer<SessionEvent>> handler;
+
+        EventSubscription(Consumer<SessionEvent> handler) {
+            this.handler = new AtomicReference<>(handler);
+        }
+    }
+
+    private static final class PendingExternalTool {
+        private static final int WAITING = 0;
+        private static final int STARTED = 1;
+        private static final int CANCELLED = 2;
+
+        private final AtomicInteger state = new AtomicInteger(WAITING);
+        private final AtomicReference<CompletableFuture<?>> future = new AtomicReference<>();
+
+        <T> T join(CompletableFuture<T> operation) {
+            future.set(operation);
+            if (state.get() == CANCELLED) {
+                operation.cancel(true);
+            }
+            try {
+                return operation.join();
+            } finally {
+                future.compareAndSet(operation, null);
+            }
+        }
+
+        boolean tryStart() {
+            return state.compareAndSet(WAITING, STARTED);
+        }
+
+        void attach(CompletableFuture<Object> toolFuture) {
+            future.set(toolFuture);
+            if (state.get() == CANCELLED) {
+                toolFuture.cancel(true);
+            }
+        }
+
+        void cancel() {
+            state.set(CANCELLED);
+            CompletableFuture<?> activeFuture = future.get();
+            if (activeFuture != null) {
+                activeFuture.cancel(true);
+            }
+        }
+    }
+
+    /**
+     * Creates a new session with the given ID and RPC client.
+     * <p>
+     * This constructor is package-private. Sessions should be created via
+     * {@link CopilotClient#createSession} or {@link CopilotClient#resumeSession}.
+     *
+     * @param sessionId
+     *            the unique session identifier
+     * @param rpc
+     *            the JSON-RPC client for communication
+     */
+    CopilotSession(String sessionId, JsonRpcClient rpc) {
+        this(sessionId, rpc, null);
+    }
+
+    /**
+     * Creates a new session with the given ID, RPC client, and workspace path.
+     * <p>
+     * This constructor is package-private. Sessions should be created via
+     * {@link CopilotClient#createSession} or {@link CopilotClient#resumeSession}.
+     *
+     * @param sessionId
+     *            the unique session identifier
+     * @param rpc
+     *            the JSON-RPC client for communication
+     * @param workspacePath
+     *            the workspace path if infinite sessions are enabled
+     */
+    CopilotSession(String sessionId, JsonRpcClient rpc, String workspacePath) {
+        this.sessionId = sessionId;
+        this.rpc = rpc;
+        this.workspacePath = workspacePath;
+        this.ui = new SessionUiApiImpl();
+        var executor = new ScheduledThreadPoolExecutor(1, r -> {
+            var t = new Thread(r, "sendAndWait-timeout");
+            t.setDaemon(true);
+            return t;
+        });
+        executor.setRemoveOnCancelPolicy(true);
+        this.timeoutScheduler = executor;
+    }
+
+    /**
+     * Sets the executor for internal async operations. Package-private; called by
+     * CopilotClient after construction.
+     */
+    void setExecutor(Executor executor) {
+        this.executor = executor;
+    }
+
+    void setGitHubTokenProviderRegistration(GitHubTokenProviderRegistry.Registration registration) {
+        this.gitHubTokenProviderRegistration = registration;
+    }
+
+    synchronized void releaseGitHubTokenProviderRegistration() {
+        GitHubTokenProviderRegistry.Registration registration = gitHubTokenProviderRegistration;
+        gitHubTokenProviderRegistration = null;
+        if (registration != null) {
+            registration.close();
+        }
+    }
+
+    /**
+     * Gets the unique identifier for this session.
+     *
+     * @return the session ID
+     */
+    public String getSessionId() {
+        return sessionId;
+    }
+
+    /**
+     * Updates the active session ID. Package-private; called by CopilotClient if
+     * the server returns a different session ID than the pre-generated one (e.g.
+     * when a v2 CLI ignores the client-supplied sessionId).
+     *
+     * @param sessionId
+     *            the server-confirmed session ID
+     */
+    void setActiveSessionId(String sessionId) {
+        this.sessionId = sessionId;
+        this.sessionRpc = null; // Reset so getRpc() lazily re-creates with the new sessionId
+    }
+
+    /**
+     * Gets the path to the session workspace directory when infinite sessions are
+     * enabled.
+     * <p>
+     * The workspace directory contains checkpoints/, plan.md, and files/
+     * subdirectories.
+     *
+     * @return the workspace path, or {@code null} if infinite sessions are disabled
+     */
+    public String getWorkspacePath() {
+        return workspacePath;
+    }
+
+    /**
+     * Sets the workspace path. Package-private; called by CopilotClient after
+     * session.create or session.resume RPC response.
+     *
+     * @param workspacePath
+     *            the workspace path
+     */
+    void setWorkspacePath(String workspacePath) {
+        this.workspacePath = workspacePath;
+    }
+
+    /**
+     * Gets the transcript repair details reported when this session was resumed.
+     *
+     * @return repair details, or {@code null} when no repair was reported
+     */
+    public TranscriptRecoveryReport getTranscriptRecovery() {
+        return transcriptRecovery;
+    }
+
+    void setTranscriptRecovery(TranscriptRecoveryReport transcriptRecovery) {
+        this.transcriptRecovery = transcriptRecovery;
+    }
+
+    /**
+     * Gets the capabilities reported by the host for this session.
+     * <p>
+     * Capabilities are populated from the session create/resume response and
+     * updated in real time via {@code capabilities.changed} events.
+     *
+     * @return the session capabilities (never {@code null})
+     */
+    public SessionCapabilities getCapabilities() {
+        return capabilities;
+    }
+
+    /**
+     * Gets the UI API for eliciting information from the user during this session.
+     * <p>
+     * All methods on this API throw {@link IllegalStateException} if the host does
+     * not report elicitation support via {@link #getCapabilities()}.
+     *
+     * @return the UI API
+     */
+    public SessionUiApi getUi() {
+        return ui;
+    }
+
+    /**
+     * Returns the typed RPC client for this session.
+     * <p>
+     * Provides strongly-typed access to all session-level API namespaces. The
+     * {@code sessionId} is injected automatically into every call.
+     * <p>
+     * Example usage:
+     *
+     * <pre>{@code
+     * var agents = session.getRpc().agent.list().get();
+     * }</pre>
+     *
+     * @return the session-scoped typed RPC client (never {@code null})
+     * @throws IllegalStateException
+     *             if the session is not connected
+     * @since 1.0.0
+     */
+    public SessionRpc getRpc() {
+        if (rpc == null) {
+            throw new IllegalStateException("Session is not connected — RPC client is unavailable");
+        }
+        SessionRpc current = sessionRpc;
+        if (current == null) {
+            synchronized (this) {
+                current = sessionRpc;
+                if (current == null) {
+                    sessionRpc = current = new SessionRpc(rpc::invoke, sessionId);
+                }
+            }
+        }
+        return current;
+    }
+
+    /**
+     * Sets a custom error handler for exceptions thrown by event handlers.
+     * <p>
+     * When an event handler registered via {@link #on(Consumer)} or
+     * {@link #on(Class, Consumer)} throws an exception during event dispatch, the
+     * error handler is invoked with the event and exception. The error is always
+     * logged at {@link Level#WARNING} regardless of whether a custom handler is
+     * set.
+     *
+     * <p>
+     * Whether dispatch continues or stops after an error is controlled by the
+     * {@link EventErrorPolicy} set via {@link #setEventErrorPolicy}. The error
+     * handler is always invoked regardless of the policy.
+     *
+     * <p>
+     * If the error handler itself throws an exception, that exception is caught and
+     * logged at {@link Level#SEVERE}, and dispatch is stopped regardless of the
+     * configured policy.
+     *
+     * <p>
+     * <b>Example:</b>
+     *
+     * <pre>{@code
+     * session.setEventErrorHandler((event, exception) -> {
+     * 	metrics.increment("handler.errors");
+     * 	logger.error("Handler failed on {}: {}", event.getType(), exception.getMessage());
+     * });
+     * }</pre>
+     *
+     * @param handler
+     *            the error handler, or {@code null} to use only the default logging
+     *            behavior
+     * @throws IllegalStateException
+     *             if this session has been terminated
+     * @see EventErrorHandler
+     * @see #setEventErrorPolicy(EventErrorPolicy)
+     * @since 1.0.8
+     */
+    public void setEventErrorHandler(EventErrorHandler handler) {
+        ensureNotTerminated();
+        this.eventErrorHandler = handler;
+    }
+
+    /**
+     * Sets the error propagation policy for event dispatch.
+     * <p>
+     * Controls whether remaining event listeners continue to execute when a
+     * preceding listener throws an exception. Errors are always logged at
+     * {@link Level#WARNING} regardless of the policy.
+     *
+     * <ul>
+     * <li>{@link EventErrorPolicy#PROPAGATE_AND_LOG_ERRORS} (default) — log the
+     * error and stop dispatch after the first error</li>
+     * <li>{@link EventErrorPolicy#SUPPRESS_AND_LOG_ERRORS} — log the error and
+     * continue dispatching to all remaining listeners</li>
+     * </ul>
+     *
+     * <p>
+     * The configured {@link EventErrorHandler} (if any) is always invoked
+     * regardless of the policy.
+     *
+     * <p>
+     * <b>Example:</b>
+     *
+     * <pre>{@code
+     * // Opt-in to suppress errors (continue dispatching despite errors)
+     * session.setEventErrorPolicy(EventErrorPolicy.SUPPRESS_AND_LOG_ERRORS);
+     * session.setEventErrorHandler((event, ex) -> logger.error("Handler failed, continuing: {}", ex.getMessage(), ex));
+     * }</pre>
+     *
+     * @param policy
+     *            the error policy (default is
+     *            {@link EventErrorPolicy#PROPAGATE_AND_LOG_ERRORS})
+     * @throws IllegalStateException
+     *             if this session has been terminated
+     * @see EventErrorPolicy
+     * @see #setEventErrorHandler(EventErrorHandler)
+     * @since 1.0.8
+     */
+    public void setEventErrorPolicy(EventErrorPolicy policy) {
+        ensureNotTerminated();
+        if (policy == null) {
+            throw new NullPointerException("policy must not be null");
+        }
+        this.eventErrorPolicy = policy;
+    }
+
+    /**
+     * Sends a simple text message to the Copilot session.
+     * <p>
+     * This is a convenience method equivalent to
+     * {@code send(new MessageOptions().setPrompt(prompt))}.
+     *
+     * @param prompt
+     *            the message text to send
+     * @return a future that resolves with the message ID assigned by the server
+     * @throws IllegalStateException
+     *             if this session has been terminated
+     * @see #send(MessageOptions)
+     */
+    public CompletableFuture<String> send(String prompt) {
+        ensureNotTerminated();
+        return send(new MessageOptions().setPrompt(prompt));
+    }
+
+    /**
+     * Sends a simple text message and waits until the session becomes idle.
+     * <p>
+     * This is a convenience method equivalent to
+     * {@code sendAndWait(new MessageOptions().setPrompt(prompt))}.
+     *
+     * @param prompt
+     *            the message text to send
+     * @return a future that resolves with the final assistant message event, or
+     *         {@code null} if no assistant message was received
+     * @throws IllegalStateException
+     *             if this session has been terminated
+     * @see #sendAndWait(MessageOptions)
+     */
+    public CompletableFuture<AssistantMessageEvent> sendAndWait(String prompt) {
+        ensureNotTerminated();
+        return sendAndWait(new MessageOptions().setPrompt(prompt));
+    }
+
+    /**
+     * Sends a message to the Copilot session.
+     * <p>
+     * This method sends a message asynchronously and returns immediately. Use
+     * {@link #sendAndWait(MessageOptions)} to wait for the response.
+     *
+     * @param options
+     *            the message options containing the prompt and attachments
+     * @return a future that resolves with the message ID assigned by the server
+     * @throws IllegalStateException
+     *             if this session has been terminated
+     * @see #sendAndWait(MessageOptions)
+     * @see #send(String)
+     */
+    public CompletableFuture<String> send(MessageOptions options) {
+        ensureNotTerminated();
+        var request = new SendMessageRequest();
+        request.setSessionId(sessionId);
+        request.setPrompt(options.getPrompt());
+        request.setAttachments(options.getAttachments());
+        request.setMode(options.getMode());
+        request.setSource(options.getSource());
+        request.setAgentMode(options.getAgentMode());
+        request.setRequestHeaders(options.getRequestHeaders());
+        request.setDisplayPrompt(options.getDisplayPrompt());
+        if (options.getResponseSchema() != null) {
+            request.setResponseFormat(Map.of("type", "json_schema", "jsonSchema",
+                    Map.of("name", "response", "strict", true, "schema", options.getResponseSchema())));
+        }
+
+        return rpc.invoke("session.send", request, SendMessageResponse.class).thenApply(SendMessageResponse::messageId);
+    }
+
+    /**
+     * Sends a message and waits until the session becomes idle.
+     * <p>
+     * This method blocks until the assistant finishes processing the message or
+     * until the timeout expires. It's suitable for simple request/response
+     * interactions where you don't need to process streaming events.
+     * <p>
+     * The returned future can be cancelled via
+     * {@link java.util.concurrent.Future#cancel(boolean)}. If cancelled externally,
+     * the future completes with {@link java.util.concurrent.CancellationException}.
+     * If the timeout expires first, the future completes exceptionally with a
+     * {@link TimeoutException}.
+     * <p>
+     * Sub-agent events with a non-empty agentId remain visible to subscribers but
+     * cannot complete this wait or supply its reply. Synchronous listeners
+     * registered before this call finish processing the root idle event before this
+     * wait completes.
+     *
+     * @param options
+     *            the message options containing the prompt and attachments
+     * @param timeoutMs
+     *            timeout in milliseconds (0 or negative for no timeout)
+     * @return a future that resolves with the final assistant message event, or
+     *         {@code null} if no assistant message was received. The future
+     *         completes exceptionally with a TimeoutException if the timeout
+     *         expires, or with CancellationException if cancelled externally.
+     * @throws IllegalStateException
+     *             if this session has been terminated
+     * @see #sendAndWait(MessageOptions)
+     * @see #send(MessageOptions)
+     */
+    public CompletableFuture<AssistantMessageEvent> sendAndWait(MessageOptions options, long timeoutMs) {
+        ensureNotTerminated();
+        if (options.getResponseSchema() != null) {
+            return sendAndWaitStructured(options, timeoutMs);
+        }
+        long totalNanos = System.nanoTime();
+        var future = new CompletableFuture<AssistantMessageEvent>();
+        var lastAssistantMessage = new AtomicReference<AssistantMessageEvent>();
+        var firstAssistantMessageLogged = new java.util.concurrent.atomic.AtomicBoolean(false);
+
+        Consumer<SessionEvent> handler = evt -> {
+            if (evt.getAgentId() != null && !evt.getAgentId().isEmpty())
+                return;
+            if (evt instanceof AssistantMessageEvent msg) {
+                lastAssistantMessage.set(msg);
+                if (firstAssistantMessageLogged.compareAndSet(false, true)) {
+                    LoggingHelpers.logTiming(LOG, Level.FINE,
+                            "CopilotSession.sendAndWait first assistant message. Elapsed={Elapsed}, SessionId="
+                                    + sessionId,
+                            totalNanos);
+                }
+            } else if (evt instanceof SessionIdleEvent idleEvent
+                    && (idleEvent.getData() == null || idleEvent.getData().mode() != SessionMode.AUTOPILOT)) {
+                LoggingHelpers.logTiming(LOG, Level.FINE,
+                        "CopilotSession.sendAndWait idle received. Elapsed={Elapsed}, SessionId=" + sessionId,
+                        totalNanos);
+                future.complete(lastAssistantMessage.get());
+            } else if (evt instanceof SessionErrorEvent errorEvent) {
+                String message = errorEvent.getData() != null ? errorEvent.getData().message() : "session error";
+                future.completeExceptionally(new RuntimeException("Session error: " + message));
+            }
+        };
+
+        var result = new CompletableFuture<AssistantMessageEvent>();
+        Closeable subscription;
+        synchronized (this) {
+            subscription = on(handler);
+            plainWaits.put(result, future);
+        }
+        result.whenComplete((value, error) -> plainWaits.remove(result));
+
+        try {
+            send(options).exceptionally(ex -> {
+                try {
+                    subscription.close();
+                } catch (IOException e) {
+                    LOG.log(Level.SEVERE, "Error closing subscription", e);
+                }
+                future.completeExceptionally(ex);
+                return null;
+            });
+        } catch (RuntimeException error) {
+            plainWaits.remove(result);
+            try {
+                subscription.close();
+            } catch (IOException closeError) {
+                error.addSuppressed(closeError);
+            }
+            throw error;
+        }
+
+        // Schedule timeout on the shared session-level scheduler.
+        // Per Javadoc, timeoutMs <= 0 means "no timeout".
+        ScheduledFuture<?> timeoutTask = null;
+        if (timeoutMs > 0) {
+            try {
+                timeoutTask = timeoutScheduler.schedule(() -> {
+                    if (!future.isDone()) {
+                        future.completeExceptionally(
+                                new TimeoutException("sendAndWait timed out after " + timeoutMs + "ms"));
+                    }
+                }, timeoutMs, TimeUnit.MILLISECONDS);
+            } catch (RejectedExecutionException e) {
+                try {
+                    subscription.close();
+                } catch (IOException closeEx) {
+                    e.addSuppressed(closeEx);
+                }
+                // Retirement owns completion when it has already shut down the scheduler.
+                if (!isTerminated) {
+                    result.completeExceptionally(e);
+                }
+                return result;
+            }
+        }
+
+        // Keep completion continuations off the event-dispatch thread. The ordered
+        // handler set, not this executor hop, ensures earlier listeners finish first.
+        final ScheduledFuture<?> taskToCancel = timeoutTask;
+        future.whenCompleteAsync((r, ex) -> {
+            try {
+                subscription.close();
+            } catch (IOException e) {
+                LOG.log(Level.SEVERE, "Error closing subscription", e);
+            }
+            if (taskToCancel != null) {
+                taskToCancel.cancel(false);
+            }
+            if (!result.isDone()) {
+                if (ex != null) {
+                    if (ex instanceof TimeoutException) {
+                        LoggingHelpers.logTiming(LOG, Level.WARNING, ex,
+                                "CopilotSession.sendAndWait failed. Elapsed={Elapsed}, SessionId=" + sessionId
+                                        + ", CompletedBy=timeout",
+                                totalNanos);
+                    } else if (!(ex instanceof java.util.concurrent.CancellationException)) {
+                        LoggingHelpers.logTiming(LOG, Level.WARNING, ex,
+                                "CopilotSession.sendAndWait failed. Elapsed={Elapsed}, SessionId=" + sessionId
+                                        + ", CompletedBy=error",
+                                totalNanos);
+                    }
+                    result.completeExceptionally(ex);
+                } else {
+                    LoggingHelpers.logTiming(
+                            LOG, Level.FINE, "CopilotSession.sendAndWait complete. Elapsed={Elapsed}, SessionId="
+                                    + sessionId + ", CompletedBy=idle, AssistantMessageReceived=" + (r != null),
+                            totalNanos);
+                    result.complete(r);
+                }
+            }
+        }, timeoutScheduler);
+
+        // When result is cancelled externally, cancel inner future to trigger cleanup
+        result.whenComplete((v, ex) -> {
+            if (result.isCancelled() && !future.isDone()) {
+                future.cancel(true);
+            }
+        });
+
+        return result;
+    }
+
+    /**
+     * Sends a message and waits until the session becomes idle with default 60
+     * second timeout.
+     *
+     * @param options
+     *            the message options containing the prompt and attachments
+     * @return a future that resolves with the final assistant message event, or
+     *         {@code null} if no assistant message was received
+     * @throws IllegalStateException
+     *             if this session has been terminated
+     * @see #sendAndWait(MessageOptions, long)
+     */
+    public CompletableFuture<AssistantMessageEvent> sendAndWait(MessageOptions options) {
+        ensureNotTerminated();
+        return sendAndWait(options, 60000);
+    }
+
+    /**
+     * Replaces this client's externally implemented tools on the live session.
+     * <p>
+     * This is a complete replacement for the tools supplied by this client only:
+     * built-in tools, MCP/plugin tools, and tools supplied by other connections are
+     * not changed. Pass the same {@link ToolDefinition} values accepted by
+     * {@link com.github.copilot.rpc.SessionConfig#setTools(List)} and
+     * {@link com.github.copilot.rpc.ResumeSessionConfig#setTools(List)}. Passing an
+     * empty list removes all tools supplied by this client.
+     * <p>
+     * The local handlers switch once the runtime accepts the replacement. Tool
+     * calls already running finish on the handlers that started them. If the
+     * runtime rejects the replacement, the previous handlers remain unchanged and
+     * the returned future completes exceptionally. Concurrent replacements on the
+     * same session are applied in call order. Cancelling the returned future while
+     * an earlier replacement is still in flight sends nothing; once the request is
+     * sent, an accepted replacement still installs its handlers unless the session
+     * closes first. Closing the session rejects queued replacements and prevents
+     * late acknowledgements from restoring retired handlers.
+     * <p>
+     * The agent sees the new tools from its next model request, which can fall
+     * within a turn in progress. A model request already in flight was made with
+     * the previous tools, so the agent can still call a tool you removed. This
+     * session doesn't answer that call, and it can stay pending until the turn is
+     * aborted. If a running turn might still call a tool you remove, replace tools
+     * while the session is idle.
+     *
+     * @param tools
+     *            the complete replacement tool list for this client
+     * @return a future that completes when the runtime accepts the replacement and
+     *         the local handler registry has been updated
+     */
+    @CopilotExperimental
+    public CompletableFuture<Void> setTools(List<ToolDefinition> tools) {
+        ensureNotTerminated();
+        List<ToolDefinition> toolList = tools != null ? List.copyOf(tools) : List.of();
+        Map<String, ToolDefinition> replacementHandlers = buildToolHandlerMap(toolList);
+        var params = new SessionToolsSetParams(sessionId, SessionRequestBuilder.toProtocolExternalTools(toolList));
+
+        var result = new CompletableFuture<Void>();
+        CompletableFuture<Void> operation;
+        synchronized (setToolsLock) {
+            operation = setToolsTail.handle((ignored, error) -> null).thenCompose(ignored -> {
+                if (result.isCancelled()) {
+                    return CompletableFuture.<Void>completedFuture(null);
+                }
+                ensureNotTerminated();
+                return getRpc().tools.set(params).thenRun(() -> {
+                    synchronized (CopilotSession.this) {
+                        ensureNotTerminated();
+                        toolHandlers.set(replacementHandlers);
+                    }
+                });
+            });
+            setToolsTail = operation.handle((ignored, error) -> null);
+        }
+
+        operation.whenComplete((value, error) -> {
+            if (error != null) {
+                result.completeExceptionally(error);
+            } else {
+                result.complete(null);
+            }
+        });
+        return result;
+    }
+
+    /**
+     * Sends a prompt using the schema generated for a {@link CopilotResponse} type.
+     *
+     * @param <T>
+     *            the result type
+     * @param prompt
+     *            the prompt
+     * @param responseType
+     *            the annotated result class
+     * @return the deserialized, non-null final response
+     */
+    @CopilotExperimental
+    public <T> CompletableFuture<T> sendAndWait(String prompt, Class<T> responseType) {
+        return sendAndWait(new MessageOptions().setPrompt(prompt), responseType, 60000);
+    }
+
+    /**
+     * Sends a message using its result type's generated schema.
+     *
+     * @param <T>
+     *            the result type
+     * @param options
+     *            the message options, without an explicit schema or immediate
+     *            delivery
+     * @param responseType
+     *            the annotated result class
+     * @return the deserialized final response
+     */
+    @CopilotExperimental
+    public <T> CompletableFuture<T> sendAndWait(MessageOptions options, Class<T> responseType) {
+        return sendAndWait(options, responseType, 60000);
+    }
+
+    /**
+     * Infers a schema using the custom-tool annotation processor, then deserializes
+     * the last correlated root message without tool requests at non-autopilot idle.
+     * Provider schema restrictions apply. Jackson deserialization is not full JSON
+     * Schema validation. Cancellation stops waiting without aborting agent work.
+     *
+     * @param <T>
+     *            the result type
+     * @param options
+     *            the message options; not mutated
+     * @param responseType
+     *            the annotated result class
+     * @param timeoutMs
+     *            the wait timeout, or nonpositive for no timeout
+     * @return the non-null deserialized response
+     */
+    @CopilotExperimental
+    public <T> CompletableFuture<T> sendAndWait(MessageOptions options, Class<T> responseType, long timeoutMs) {
+        ensureNotTerminated();
+        if (options.getResponseSchema() != null || "immediate".equals(options.getMode())) {
+            throw new IllegalArgumentException("Typed output cannot specify a response schema or immediate delivery");
+        }
+        var message = options.clone().setResponseSchema(ResponseSchemas.forType(responseType));
+        var waiting = sendAndWaitStructured(message, timeoutMs);
+        CompletableFuture<T> result = waiting.thenApply(event -> {
+            try {
+                T value = MAPPER.readerFor(responseType)
+                        .with(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                        .readValue(event.getData().content());
+                if (value == null)
+                    throw new IllegalStateException("Structured response was JSON null, not a result");
+                return value;
+            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                throw new java.util.concurrent.CompletionException(e);
+            }
+        });
+        result.whenComplete((value, error) -> {
+            if (result.isCancelled())
+                waiting.cancel(true);
+        });
+        return result;
+    }
+
+    private CompletableFuture<AssistantMessageEvent> sendAndWaitStructured(MessageOptions options, long timeoutMs) {
+        var result = new CompletableFuture<AssistantMessageEvent>();
+        class State {
+            String messageId;
+            boolean started;
+            AssistantMessageEvent last;
+            final List<SessionEvent> pending = new ArrayList<>();
+
+            synchronized void event(SessionEvent event) {
+                if (result.isDone() || (event.getAgentId() != null && !event.getAgentId().isEmpty()))
+                    return;
+                if (messageId == null) {
+                    pending.add(event);
+                    return;
+                }
+                if (event instanceof com.github.copilot.generated.UserMessageEvent user
+                        && messageId.equals(user.getData().messageId())) {
+                    started = true;
+                } else if (event instanceof AssistantMessageEvent assistant
+                        && messageId.equals(assistant.getData().originatingMessageId())) {
+                    started = true;
+                    last = assistant.getData().toolRequests() != null && !assistant.getData().toolRequests().isEmpty()
+                            ? null
+                            : assistant;
+                } else if (event instanceof SessionIdleEvent idle && started
+                        && idle.getData().mode() != SessionMode.AUTOPILOT) {
+                    if (Boolean.TRUE.equals(idle.getData().aborted())) {
+                        result.completeExceptionally(
+                                new IllegalStateException("Session aborted before structured output completed"));
+                    } else if (last == null || last.getData().content().isBlank()) {
+                        result.completeExceptionally(
+                                new IllegalStateException("Run completed without a structured assistant response"));
+                    } else {
+                        result.complete(last);
+                    }
+                } else if (event instanceof SessionErrorEvent error && started) {
+                    result.completeExceptionally(
+                            new IllegalStateException("Session error: " + error.getData().message()));
+                }
+            }
+        }
+        var state = new State();
+        Closeable subscription;
+        synchronized (this) {
+            subscription = on(event -> {
+                if (event instanceof AssistantMessageEvent || event instanceof SessionIdleEvent
+                        || event instanceof SessionErrorEvent
+                        || event instanceof com.github.copilot.generated.UserMessageEvent) {
+                    state.event(event);
+                }
+            });
+            structuredWaits.add(result);
+        }
+        ScheduledFuture<?> timer;
+        try {
+            timer = timeoutMs > 0
+                    ? timeoutScheduler.schedule(
+                            () -> result.completeExceptionally(
+                                    new TimeoutException("Structured output timed out after " + timeoutMs + "ms")),
+                            timeoutMs, TimeUnit.MILLISECONDS)
+                    : null;
+        } catch (RejectedExecutionException e) {
+            result.completeExceptionally(e);
+            timer = null;
+        }
+        final ScheduledFuture<?> timeout = timer;
+        result.whenComplete((value, error) -> {
+            structuredWaits.remove(result);
+            if (timeout != null)
+                timeout.cancel(false);
+            try {
+                subscription.close();
+            } catch (IOException e) {
+                LOG.log(Level.SEVERE, "Error closing structured output subscription", e);
+            }
+        });
+        if (!result.isDone()) {
+            try {
+                send(options).whenComplete((id, error) -> {
+                    if (error != null) {
+                        result.completeExceptionally(error);
+                    } else {
+                        synchronized (state) {
+                            state.messageId = id;
+                            for (var event : state.pending)
+                                state.event(event);
+                            state.pending.clear();
+                        }
+                    }
+                });
+            } catch (IllegalStateException | IllegalArgumentException e) {
+                result.completeExceptionally(e);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Registers a callback for all session events.
+     * <p>
+     * The handler will be invoked for every event in this session, including
+     * assistant messages, tool calls, and session state changes. For type-safe
+     * handling of specific event types, prefer {@link #on(Class, Consumer)}
+     * instead. A handler registered from an event handler does not receive the
+     * event currently being delivered.
+     *
+     * <p>
+     * <b>Exception handling:</b> If a handler throws an exception, the error is
+     * routed to the configured {@link EventErrorHandler} (if set). Whether
+     * remaining handlers execute depends on the configured
+     * {@link EventErrorPolicy}.
+     *
+     * <p>
+     * <b>Example:</b>
+     *
+     * <pre>{@code
+     * // Collect all events
+     * var events = new ArrayList<SessionEvent>();
+     * session.on(events::add);
+     * }</pre>
+     *
+     * @param handler
+     *            a callback to be invoked when a session event occurs
+     * @return a Closeable that, when closed, unsubscribes the handler
+     * @throws IllegalStateException
+     *             if this session has been terminated
+     * @see #on(Class, Consumer)
+     * @see SessionEvent
+     * @see #setEventErrorPolicy(EventErrorPolicy)
+     */
+    public Closeable on(Consumer<SessionEvent> handler) {
+        java.util.Objects.requireNonNull(handler, "handler");
+        EventSubscription subscription;
+        synchronized (this) {
+            ensureNotTerminated();
+            subscription = eventHandlers.stream().filter(entry -> handler.equals(entry.handler.get())).findFirst()
+                    .orElseGet(() -> new EventSubscription(handler));
+            eventHandlers.add(subscription);
+        }
+        return () -> {
+            synchronized (this) {
+                subscription.handler.set(null);
+                eventHandlers.remove(subscription);
+            }
+        };
+    }
+
+    /**
+     * Registers an event handler for a specific event type.
+     * <p>
+     * This provides a type-safe way to handle specific events without needing
+     * {@code instanceof} checks. The handler will only be called for events
+     * matching the specified type.
+     *
+     * <p>
+     * <b>Exception handling:</b> If a handler throws an exception, the error is
+     * routed to the configured {@link EventErrorHandler} (if set). Whether
+     * remaining handlers execute depends on the configured
+     * {@link EventErrorPolicy}.
+     *
+     * <p>
+     * <b>Example Usage</b>
+     * </p>
+     *
+     * <pre>{@code
+     * // Handle assistant messages
+     * session.on(AssistantMessageEvent.class, msg -> {
+     * 	System.out.println(msg.getData().content());
+     * });
+     *
+     * // Handle session idle
+     * session.on(SessionIdleEvent.class, idle -> {
+     * 	done.complete(null);
+     * });
+     *
+     * // Handle streaming deltas
+     * session.on(AssistantMessageDeltaEvent.class, delta -> {
+     * 	System.out.print(delta.getData().deltaContent());
+     * });
+     * }</pre>
+     *
+     * @param <T>
+     *            the event type
+     * @param eventType
+     *            the class of the event to listen for
+     * @param handler
+     *            a callback invoked when events of this type occur
+     * @return a Closeable that unsubscribes the handler when closed
+     * @throws IllegalStateException
+     *             if this session has been terminated
+     * @see #on(Consumer)
+     * @see SessionEvent
+     */
+    public <T extends SessionEvent> Closeable on(Class<T> eventType, Consumer<T> handler) {
+        ensureNotTerminated();
+        Consumer<SessionEvent> wrapper = event -> {
+            if (eventType.isInstance(event)) {
+                handler.accept(eventType.cast(event));
+            }
+        };
+        return on(wrapper);
+    }
+
+    /**
+     * Dispatches an event to all registered handlers.
+     * <p>
+     * This is called internally when events are received from the server. Each
+     * handler is invoked in its own try/catch block. Errors are always logged at
+     * {@link Level#WARNING}. Whether dispatch continues after a handler error
+     * depends on the configured {@link EventErrorPolicy}:
+     * <ul>
+     * <li>{@link EventErrorPolicy#PROPAGATE_AND_LOG_ERRORS} (default) — dispatch
+     * stops after the first error</li>
+     * <li>{@link EventErrorPolicy#SUPPRESS_AND_LOG_ERRORS} — remaining handlers
+     * still execute</li>
+     * </ul>
+     * <p>
+     * The configured {@link EventErrorHandler} is always invoked (if set),
+     * regardless of the policy. If the error handler itself throws, dispatch stops
+     * regardless of policy and the error is logged at {@link Level#SEVERE}.
+     *
+     * @param event
+     *            the event to dispatch
+     * @see #setEventErrorHandler(EventErrorHandler)
+     * @see #setEventErrorPolicy(EventErrorPolicy)
+     */
+    void dispatchEvent(SessionEvent event) {
+        if (callbacksRetired) {
+            return;
+        }
+        // Handle broadcast request events (protocol v3) and passive in-memory state
+        // updates (capabilities, open-canvases snapshot) before dispatching to user
+        // handlers. Fire-and-forget: any RPC response is sent asynchronously.
+        handleBroadcastEventAsync(event);
+
+        for (EventSubscription subscription : eventHandlers) {
+            Consumer<SessionEvent> handler;
+            synchronized (this) {
+                if (callbacksRetired) {
+                    return;
+                }
+                handler = subscription.handler.get();
+            }
+            if (handler == null) {
+                continue;
+            }
+            try {
+                handler.accept(event);
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "Error in event handler", e);
+                EventErrorHandler errorHandler = this.eventErrorHandler;
+                if (errorHandler != null) {
+                    try {
+                        errorHandler.handleError(event, e);
+                    } catch (Exception errorHandlerException) {
+                        LOG.log(Level.SEVERE, "Error in event error handler", errorHandlerException);
+                        break; // error handler itself failed — stop regardless of policy
+                    }
+                }
+                if (eventErrorPolicy == EventErrorPolicy.PROPAGATE_AND_LOG_ERRORS) {
+                    break;
+                }
+            }
+        }
+    }
+
+    /**
+     * Handles broadcast request events by executing local handlers and responding
+     * via RPC (protocol v3), and applies passive in-memory state updates such as
+     * the open-canvases snapshot.
+     * <p>
+     * Fire-and-forget: any RPC response is sent asynchronously.
+     *
+     * @param event
+     *            the event to handle
+     */
+    private void handleBroadcastEventAsync(SessionEvent event) {
+        // Maintain the in-memory open-canvases snapshot before user handlers run so
+        // they observe the freshest state. Best-effort: snapshot upkeep must never
+        // disrupt event delivery, so failures are logged and swallowed.
+        try {
+            updateOpenCanvasesFromEvent(event);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Failed to update open-canvases snapshot", e);
+        }
+
+        if (event instanceof ExternalToolRequestedEvent toolEvent) {
+            var data = toolEvent.getData();
+            if (data == null || data.requestId() == null || data.toolName() == null) {
+                return;
+            }
+            ToolDefinition tool = getTool(data.toolName());
+            if (tool == null) {
+                return; // This client doesn't handle this tool; another client will
+            }
+            String agentId = toolEvent.getAgentId();
+            executeToolAndRespondAsync(data.requestId(), data.toolName(), data.toolCallId(), data.arguments(), tool,
+                    agentId == null || agentId.isEmpty() ? null : agentId);
+
+        } else if (event instanceof ExternalToolCompletedEvent completedEvent) {
+            var data = completedEvent.getData();
+            if (data != null && data.requestId() != null) {
+                PendingExternalTool pending = pendingExternalTools.remove(data.requestId());
+                if (pending != null) {
+                    pending.cancel();
+                }
+            }
+        } else if (event instanceof PermissionRequestedEvent permEvent) {
+            var data = permEvent.getData();
+            if (data == null || data.requestId() == null || data.permissionRequest() == null) {
+                return;
+            }
+            if (Boolean.TRUE.equals(data.resolvedByHook())) {
+                return; // Already resolved by a permissionRequest hook; no client action needed.
+            }
+            PermissionHandler handler = permissionHandler.get();
+            if (handler == null) {
+                return; // This client doesn't handle permissions; another client will
+            }
+            executePermissionAndRespondAsync(data.requestId(),
+                    MAPPER.convertValue(data.permissionRequest(), PermissionRequest.class), handler);
+        } else if (event instanceof McpOauthRequiredEvent authEvent) {
+            var data = authEvent.getData();
+            if (data == null || data.requestId() == null) {
+                return;
+            }
+            McpAuthHandler handler = mcpAuthHandler.get();
+            if (handler == null) {
+                LOG.warning(() -> "Received MCP OAuth request without a registered MCP auth handler. SessionId="
+                        + sessionId + ", RequestId=" + data.requestId());
+                return;
+            }
+            executeMcpAuthAndRespondAsync(new McpAuthRequest(data.requestId(), data.serverName(), data.serverUrl(),
+                    data.reason(), data.wwwAuthenticateParams(), data.resourceMetadata(), data.staticClientConfig()),
+                    handler);
+        } else if (event instanceof CommandExecuteEvent cmdEvent) {
+            var data = cmdEvent.getData();
+            if (data == null || data.requestId() == null || data.commandName() == null) {
+                return;
+            }
+            executeCommandAndRespondAsync(data.requestId(), data.commandName(), data.command(), data.args());
+        } else if (event instanceof ElicitationRequestedEvent elicitEvent) {
+            var data = elicitEvent.getData();
+            if (data == null || data.requestId() == null) {
+                return;
+            }
+            ElicitationHandler handler = elicitationHandler.get();
+            if (handler != null) {
+                ElicitationSchema schema = null;
+                if (data.requestedSchema() != null) {
+                    schema = new ElicitationSchema().setType(data.requestedSchema().type())
+                            .setProperties(data.requestedSchema().properties())
+                            .setRequired(data.requestedSchema().required());
+                }
+                var context = new ElicitationContext().setSessionId(sessionId).setMessage(data.message())
+                        .setRequestedSchema(schema).setMode(data.mode() != null ? data.mode().getValue() : null)
+                        .setElicitationSource(data.elicitationSource()).setUrl(data.url());
+                handleElicitationRequestAsync(context, data.requestId());
+            }
+        } else if (event instanceof CapabilitiesChangedEvent capEvent) {
+            var data = capEvent.getData();
+            if (data != null) {
+                var newCapabilities = new SessionCapabilities();
+                if (data.ui() != null) {
+                    newCapabilities.setUi(new SessionUiCapabilities().setElicitation(data.ui().elicitation()));
+                } else {
+                    newCapabilities.setUi(capabilities.getUi());
+                }
+                capabilities = newCapabilities;
+            }
+        }
+    }
+
+    /**
+     * Populates the invocation's available-tools snapshot when it targets the
+     * built-in tool-search tool, so an override can filter the live catalog without
+     * issuing its own RPC. The snapshot is fetched only for that tool to avoid a
+     * round-trip on every ordinary tool call; a failed fetch leaves the snapshot
+     * {@code null} rather than failing the tool. Used by the direct RPC dispatch
+     * path; event-dispatched tools perform the same lookup with request-scoped
+     * cancellation.
+     *
+     * @param toolName
+     *            the name of the tool being invoked
+     * @param invocation
+     *            the invocation to populate in place
+     */
+    void populateToolSearchMetadata(String toolName, com.github.copilot.rpc.ToolInvocation invocation) {
+        if (!TOOL_SEARCH_TOOL_NAME.equals(toolName)) {
+            return;
+        }
+        try {
+            var metadata = getRpc().tools.getCurrentMetadata().join();
+            invocation.setAvailableTools(metadata.tools());
+        } catch (Exception e) {
+            LOG.log(Level.FINE, "Failed to fetch tool metadata for tool search", e);
+        }
+    }
+
+    /**
+     * Executes a tool handler and sends the result back via
+     * {@code session.tools.handlePendingToolCall}.
+     */
+    private void executeToolAndRespondAsync(String requestId, String toolName, String toolCallId, Object arguments,
+            ToolDefinition tool, String agentId) {
+        var pending = new PendingExternalTool();
+        synchronized (this) {
+            if (isTerminated || externalToolsClosed || pendingExternalTools.putIfAbsent(requestId, pending) != null) {
+                return;
+            }
+        }
+        Runnable task = () -> {
+            try {
+                JsonNode argumentsNode = arguments instanceof JsonNode jn
+                        ? jn
+                        : (arguments != null ? MAPPER.valueToTree(arguments) : null);
+                var invocation = new com.github.copilot.rpc.ToolInvocation().setSessionId(sessionId)
+                        .setToolCallId(toolCallId).setToolName(toolName).setArguments(argumentsNode);
+                invocation.setAgentId(agentId).setRequestId(requestId);
+
+                if (TOOL_SEARCH_TOOL_NAME.equals(toolName)) {
+                    try {
+                        var metadata = pending.join(getRpc().tools.getCurrentMetadata());
+                        if (metadata != null) {
+                            invocation.setAvailableTools(metadata.tools());
+                        }
+                    } catch (RuntimeException e) {
+                        if (pendingExternalTools.get(requestId) != pending) {
+                            return;
+                        }
+                        LOG.log(Level.FINE, "Failed to fetch tool metadata for tool search", e);
+                    }
+                    if (pendingExternalTools.get(requestId) != pending) {
+                        return;
+                    }
+                }
+
+                if (!pending.tryStart()) {
+                    return;
+                }
+                CompletableFuture<Object> toolFuture = tool.handler().invoke(invocation);
+                pending.attach(toolFuture);
+                toolFuture.thenAccept(result -> {
+                    if (!pendingExternalTools.remove(requestId, pending)) {
+                        return;
+                    }
+                    try {
+                        ToolResultObject toolResult;
+                        if (result instanceof ToolResultObject tr) {
+                            toolResult = tr;
+                        } else {
+                            toolResult = ToolResultObject
+                                    .success(result instanceof String s ? s : MAPPER.writeValueAsString(result));
+                        }
+                        getRpc().tools.handlePendingToolCall(
+                                new SessionToolsHandlePendingToolCallParams(sessionId, requestId, toolResult, null));
+                    } catch (Exception e) {
+                        LOG.log(Level.WARNING, "Error sending tool result for requestId=" + requestId, e);
+                    }
+                }).exceptionally(ex -> {
+                    if (!pendingExternalTools.remove(requestId, pending)) {
+                        return null;
+                    }
+                    try {
+                        getRpc().tools.handlePendingToolCall(new SessionToolsHandlePendingToolCallParams(sessionId,
+                                requestId, null, ex.getMessage() != null ? ex.getMessage() : ex.toString()));
+                    } catch (Exception e) {
+                        LOG.log(Level.WARNING, "Error sending tool error for requestId=" + requestId, e);
+                    }
+                    return null;
+                }).whenComplete((result, error) -> pendingExternalTools.remove(requestId, pending));
+            } catch (Exception e) {
+                if (!pendingExternalTools.remove(requestId, pending)) {
+                    return;
+                }
+                LOG.log(Level.WARNING, "Error executing tool for requestId=" + requestId, e);
+                try {
+                    getRpc().tools.handlePendingToolCall(new SessionToolsHandlePendingToolCallParams(sessionId,
+                            requestId, null, e.getMessage() != null ? e.getMessage() : e.toString()));
+                } catch (Exception sendEx) {
+                    LOG.log(Level.WARNING, "Error sending tool error for requestId=" + requestId, sendEx);
+                }
+            }
+        };
+        try {
+            if (executor != null) {
+                CompletableFuture.runAsync(task, executor);
+            } else {
+                CompletableFuture.runAsync(task);
+            }
+        } catch (RejectedExecutionException e) {
+            LOG.log(Level.WARNING, "Executor rejected tool task for requestId=" + requestId + "; running inline", e);
+            task.run();
+        }
+    }
+
+    void cancelPendingExternalTools() {
+        List<PendingExternalTool> pending;
+        synchronized (this) {
+            externalToolsClosed = true;
+            pending = new ArrayList<>(pendingExternalTools.values());
+            pendingExternalTools.clear();
+        }
+        pending.forEach(PendingExternalTool::cancel);
+    }
+
+    /**
+     * Builds a {@link SessionUiHandlePendingElicitationParams} carrying a
+     * {@code cancel} action, used when an elicitation handler throws or the handler
+     * future completes exceptionally.
+     */
+    private SessionUiHandlePendingElicitationParams buildElicitationCancelParams(String requestId) {
+        var cancelResult = new UIElicitationResponse(UIElicitationResponseAction.CANCEL, null, null);
+        return new SessionUiHandlePendingElicitationParams(sessionId, requestId, cancelResult);
+    }
+
+    /**
+     * Executes a permission handler and sends the result back via
+     * {@code session.permissions.handlePendingPermissionRequest}.
+     */
+    private void executePermissionAndRespondAsync(String requestId, PermissionRequest permissionRequest,
+            PermissionHandler handler) {
+        Runnable task = () -> {
+            try {
+                var invocation = new PermissionInvocation();
+                invocation.setSessionId(sessionId);
+                invocation.setManagedSettingsEnabled(managedSettingsEnabled);
+                handler.handle(permissionRequest, invocation).thenAccept(result -> {
+                    try {
+                        PermissionRequestResultKind kind = new PermissionRequestResultKind(result.getKind());
+                        if (PermissionRequestResultKind.NO_RESULT.equals(kind)) {
+                            // Handler explicitly abstains — leave the request unanswered
+                            // so another client can handle it.
+                            return;
+                        }
+                        getRpc().permissions.handlePendingPermissionRequest(
+                                new SessionPermissionsHandlePendingPermissionRequestParams(sessionId, requestId, result,
+                                        result.getDecisionContext()));
+                    } catch (Exception e) {
+                        LOG.log(Level.WARNING, "Error sending permission result for requestId=" + requestId, e);
+                    }
+                }).exceptionally(ex -> {
+                    LOG.log(Level.SEVERE, "Permission handler failed for requestId=" + requestId, ex);
+                    try {
+                        PermissionRequestResult denied = new PermissionRequestResult();
+                        denied.setKind(PermissionRequestResultKind.DENIED_COULD_NOT_REQUEST_FROM_USER);
+                        getRpc().permissions.handlePendingPermissionRequest(
+                                new SessionPermissionsHandlePendingPermissionRequestParams(sessionId, requestId, denied,
+                                        null));
+                    } catch (Exception e) {
+                        LOG.log(Level.WARNING, "Error sending permission denied for requestId=" + requestId, e);
+                    }
+                    return null;
+                });
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "Error executing permission handler for requestId=" + requestId, e);
+                try {
+                    PermissionRequestResult denied = new PermissionRequestResult();
+                    denied.setKind(PermissionRequestResultKind.DENIED_COULD_NOT_REQUEST_FROM_USER);
+                    getRpc().permissions.handlePendingPermissionRequest(
+                            new SessionPermissionsHandlePendingPermissionRequestParams(sessionId, requestId, denied,
+                                    null));
+                } catch (Exception sendEx) {
+                    LOG.log(Level.WARNING, "Error sending permission denied for requestId=" + requestId, sendEx);
+                }
+            }
+        };
+        try {
+            if (executor != null) {
+                CompletableFuture.runAsync(task, executor);
+            } else {
+                CompletableFuture.runAsync(task);
+            }
+        } catch (RejectedExecutionException e) {
+            LOG.log(Level.WARNING, "Executor rejected perm task for requestId=" + requestId + "; running inline", e);
+            task.run();
+        }
+    }
+
+    private void executeMcpAuthAndRespondAsync(McpAuthRequest request, McpAuthHandler handler) {
+        Runnable task = () -> {
+            try {
+                var invocation = new McpAuthInvocation().setSessionId(sessionId);
+                handler.handle(request, invocation)
+                        .thenAccept(result -> sendMcpAuthResponse(request.requestId(), result)).exceptionally(ex -> {
+                            sendMcpAuthResponse(request.requestId(), McpAuthResult.cancelled());
+                            return null;
+                        });
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "Error executing MCP auth handler for requestId=" + request.requestId(), e);
+                sendMcpAuthResponse(request.requestId(), McpAuthResult.cancelled());
+            }
+        };
+        try {
+            if (executor != null) {
+                CompletableFuture.runAsync(task, executor);
+            } else {
+                CompletableFuture.runAsync(task);
+            }
+        } catch (RejectedExecutionException e) {
+            LOG.log(Level.WARNING,
+                    "Executor rejected MCP auth task for requestId=" + request.requestId() + "; running inline", e);
+            task.run();
+        }
+    }
+
+    private void sendMcpAuthResponse(String requestId, McpAuthResult result) {
+        try {
+            Object response;
+            if (result == null || result.isCancelled() || result.token() == null) {
+                response = Map.of("kind", "cancelled");
+            } else {
+                var token = result.token();
+                var tokenResponse = new java.util.HashMap<String, Object>();
+                tokenResponse.put("kind", "token");
+                tokenResponse.put("accessToken", token.accessToken());
+                if (token.tokenType() != null) {
+                    tokenResponse.put("tokenType", token.tokenType());
+                }
+                if (token.expiresIn() != null) {
+                    tokenResponse.put("expiresIn", token.expiresIn());
+                }
+                response = tokenResponse;
+            }
+            getRpc().mcp.oauth.handlePendingRequest(
+                    new SessionMcpOauthHandlePendingRequestParams(sessionId, requestId, response));
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Error sending MCP auth response for requestId=" + requestId, e);
+        }
+    }
+
+    /**
+     * Registers custom tool handlers for this session.
+     * <p>
+     * Called internally when creating or resuming a session with tools.
+     *
+     * @param tools
+     *            the list of tool definitions with handlers
+     */
+    void registerTools(List<ToolDefinition> tools) {
+        toolHandlers.set(buildToolHandlerMap(tools));
+    }
+
+    private static Map<String, ToolDefinition> buildToolHandlerMap(List<ToolDefinition> tools) {
+        if (tools == null || tools.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, ToolDefinition> handlers = new LinkedHashMap<>();
+        for (ToolDefinition tool : tools) {
+            handlers.put(tool.name(), tool);
+        }
+        return Collections.unmodifiableMap(handlers);
+    }
+
+    /**
+     * Executes a command handler and sends the result back via
+     * {@code session.commands.handlePendingCommand}.
+     */
+    private void executeCommandAndRespondAsync(String requestId, String commandName, String command, String args) {
+        CommandHandler handler = commandHandlers.get(commandName);
+        Runnable task = () -> {
+            if (handler == null) {
+                try {
+                    getRpc().commands.handlePendingCommand(new SessionCommandsHandlePendingCommandParams(sessionId,
+                            requestId, "Unknown command: " + commandName));
+                } catch (Exception e) {
+                    LOG.log(Level.WARNING, "Error sending command error for requestId=" + requestId, e);
+                }
+                return;
+            }
+            try {
+                var ctx = new CommandContext().setSessionId(sessionId).setCommand(command).setCommandName(commandName)
+                        .setArgs(args);
+                handler.handle(ctx).thenRun(() -> {
+                    try {
+                        getRpc().commands.handlePendingCommand(
+                                new SessionCommandsHandlePendingCommandParams(sessionId, requestId, null));
+                    } catch (Exception e) {
+                        LOG.log(Level.WARNING, "Error sending command result for requestId=" + requestId, e);
+                    }
+                }).exceptionally(ex -> {
+                    try {
+                        String msg = ex.getMessage() != null ? ex.getMessage() : ex.toString();
+                        getRpc().commands.handlePendingCommand(
+                                new SessionCommandsHandlePendingCommandParams(sessionId, requestId, msg));
+                    } catch (Exception e) {
+                        LOG.log(Level.WARNING, "Error sending command error for requestId=" + requestId, e);
+                    }
+                    return null;
+                });
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "Error executing command for requestId=" + requestId, e);
+                try {
+                    String msg = e.getMessage() != null ? e.getMessage() : e.toString();
+                    getRpc().commands.handlePendingCommand(
+                            new SessionCommandsHandlePendingCommandParams(sessionId, requestId, msg));
+                } catch (Exception sendEx) {
+                    LOG.log(Level.WARNING, "Error sending command error for requestId=" + requestId, sendEx);
+                }
+            }
+        };
+        try {
+            if (executor != null) {
+                CompletableFuture.runAsync(task, executor);
+            } else {
+                CompletableFuture.runAsync(task);
+            }
+        } catch (RejectedExecutionException e) {
+            LOG.log(Level.WARNING, "Executor rejected command task for requestId=" + requestId + "; running inline", e);
+            task.run();
+        }
+    }
+
+    /**
+     * Dispatches an elicitation request to the registered handler and responds via
+     * {@code session.ui.handlePendingElicitation}. Auto-cancels on handler errors.
+     */
+    private void handleElicitationRequestAsync(ElicitationContext context, String requestId) {
+        ElicitationHandler handler = elicitationHandler.get();
+        if (handler == null) {
+            return;
+        }
+        Runnable task = () -> {
+            try {
+                handler.handle(context).thenAccept(result -> {
+                    try {
+                        String actionStr = result.getAction() != null
+                                ? result.getAction().getValue()
+                                : ElicitationResultAction.CANCEL.getValue();
+                        var parsedAction = UIElicitationResponseAction.fromValue(actionStr);
+                        var elicitationResult = new UIElicitationResponse(parsedAction, result.getContent(), null);
+                        getRpc().ui.handlePendingElicitation(
+                                new SessionUiHandlePendingElicitationParams(sessionId, requestId, elicitationResult));
+                    } catch (Exception e) {
+                        LOG.log(Level.WARNING, "Error sending elicitation result for requestId=" + requestId, e);
+                    }
+                }).exceptionally(ex -> {
+                    try {
+                        getRpc().ui.handlePendingElicitation(buildElicitationCancelParams(requestId));
+                    } catch (Exception e) {
+                        LOG.log(Level.WARNING, "Error sending elicitation cancel for requestId=" + requestId, e);
+                    }
+                    return null;
+                });
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "Error executing elicitation handler for requestId=" + requestId, e);
+                try {
+                    getRpc().ui.handlePendingElicitation(buildElicitationCancelParams(requestId));
+                } catch (Exception sendEx) {
+                    LOG.log(Level.WARNING, "Error sending elicitation cancel for requestId=" + requestId, sendEx);
+                }
+            }
+        };
+        try {
+            if (executor != null) {
+                CompletableFuture.runAsync(task, executor);
+            } else {
+                CompletableFuture.runAsync(task);
+            }
+        } catch (RejectedExecutionException e) {
+            LOG.log(Level.WARNING, "Executor rejected elicitation task for requestId=" + requestId + "; running inline",
+                    e);
+            task.run();
+        }
+    }
+
+    /**
+     * Throws if the host does not support elicitation.
+     */
+    private void assertElicitation() {
+        SessionCapabilities caps = capabilities;
+        if (caps == null || caps.getUi() == null || !caps.getUi().getElicitation().orElse(false)) {
+            throw new IllegalStateException("Elicitation is not supported by the host. "
+                    + "Check session.getCapabilities().getUi().getElicitation().orElse(false) before calling UI methods.");
+        }
+    }
+
+    /**
+     * Implements {@link SessionUiApi} backed by the session's RPC connection.
+     */
+    private final class SessionUiApiImpl implements SessionUiApi {
+
+        @Override
+        public CompletableFuture<ElicitationResult> elicitation(ElicitationParams params) {
+            assertElicitation();
+            return getRpc().ui.elicitation(new SessionUiElicitationParams(sessionId, null, params.getMessage(),
+                    new UIElicitationSchema(params.getRequestedSchema().getType(),
+                            params.getRequestedSchema().getProperties(), params.getRequestedSchema().getRequired()),
+                    null, null)).thenApply(resp -> {
+                        var result = new ElicitationResult();
+                        if (resp.action() != null) {
+                            for (ElicitationResultAction a : ElicitationResultAction.values()) {
+                                if (a.getValue().equalsIgnoreCase(resp.action().getValue())) {
+                                    result.setAction(a);
+                                    break;
+                                }
+                            }
+                        }
+                        if (result.getAction() == null) {
+                            result.setAction(ElicitationResultAction.CANCEL);
+                        }
+                        result.setContent(resp.content());
+                        return result;
+                    });
+        }
+
+        @Override
+        public CompletableFuture<Boolean> confirm(String message) {
+            assertElicitation();
+            var field = Map.of("type", "boolean", "default", (Object) true);
+            return getRpc().ui
+                    .elicitation(new SessionUiElicitationParams(sessionId, null, message, new UIElicitationSchema(
+                            "object", Map.of("confirmed", (Object) field), List.of("confirmed")), null, null))
+                    .thenApply(resp -> {
+                        if (resp.action() == UIElicitationResponseAction.ACCEPT && resp.content() != null) {
+                            Object val = resp.content().get("confirmed");
+                            if (val instanceof Boolean b) {
+                                return b;
+                            }
+                            if (val instanceof com.fasterxml.jackson.databind.node.BooleanNode bn) {
+                                return bn.booleanValue();
+                            }
+                            if (val instanceof String s) {
+                                return Boolean.parseBoolean(s);
+                            }
+                        }
+                        return false;
+                    });
+        }
+
+        @Override
+        public CompletableFuture<String> select(String message, String[] options) {
+            assertElicitation();
+            var field = Map.of("type", (Object) "string", "enum", (Object) options);
+            return getRpc().ui
+                    .elicitation(new SessionUiElicitationParams(sessionId, null, message, new UIElicitationSchema(
+                            "object", Map.of("selection", (Object) field), List.of("selection")), null, null))
+                    .thenApply(resp -> {
+                        if (resp.action() == UIElicitationResponseAction.ACCEPT && resp.content() != null) {
+                            Object val = resp.content().get("selection");
+                            return val != null ? val.toString() : null;
+                        }
+                        return null;
+                    });
+        }
+
+        @Override
+        public CompletableFuture<String> input(String message, InputOptions options) {
+            assertElicitation();
+            var field = new java.util.LinkedHashMap<String, Object>();
+            field.put("type", "string");
+            if (options != null) {
+                if (options.getTitle() != null)
+                    field.put("title", options.getTitle());
+                if (options.getDescription() != null)
+                    field.put("description", options.getDescription());
+                if (options.getMinLength().isPresent())
+                    field.put("minLength", options.getMinLength().getAsInt());
+                if (options.getMaxLength().isPresent())
+                    field.put("maxLength", options.getMaxLength().getAsInt());
+                if (options.getFormat() != null)
+                    field.put("format", options.getFormat());
+                if (options.getDefaultValue() != null)
+                    field.put("default", options.getDefaultValue());
+            }
+            return getRpc().ui.elicitation(new SessionUiElicitationParams(sessionId, null, message,
+                    new UIElicitationSchema("object", Map.of("value", (Object) field), List.of("value")), null, null))
+                    .thenApply(resp -> {
+                        if (resp.action() == UIElicitationResponseAction.ACCEPT && resp.content() != null) {
+                            Object val = resp.content().get("value");
+                            return val != null ? val.toString() : null;
+                        }
+                        return null;
+                    });
+        }
+    }
+
+    /**
+     * Retrieves a registered tool by name.
+     *
+     * @param name
+     *            the tool name
+     * @return the tool definition, or {@code null} if not found
+     */
+    ToolDefinition getTool(String name) {
+        return toolHandlers.get().get(name);
+    }
+
+    /**
+     * Registers a handler for permission requests.
+     * <p>
+     * Called internally when creating or resuming a session with permission
+     * handling.
+     *
+     * @param handler
+     *            the permission handler
+     */
+    void registerPermissionHandler(PermissionHandler handler) {
+        permissionHandler.set(handler);
+    }
+
+    void setManagedSettingsEnabled(boolean managedSettingsEnabled) {
+        this.managedSettingsEnabled = managedSettingsEnabled;
+    }
+
+    void registerMcpAuthHandler(McpAuthHandler handler) {
+        mcpAuthHandler.set(handler);
+    }
+
+    void registerSkillProvider(SkillProvider provider) {
+        skillProvider.set(provider);
+    }
+
+    SkillProvider getSkillProvider() {
+        return skillProvider.get();
+    }
+
+    void clearSkillProvider() {
+        skillProvider.set(null);
+    }
+
+    /**
+     * Handles a permission request from the Copilot CLI.
+     * <p>
+     * Called internally when the server requests permission for an operation.
+     *
+     * @param permissionRequestData
+     *            the JSON data for the permission request
+     * @return a future that resolves with the permission result
+     */
+    CompletableFuture<PermissionRequestResult> handlePermissionRequest(JsonNode permissionRequestData) {
+        PermissionHandler handler = permissionHandler.get();
+        if (handler == null) {
+            PermissionRequestResult result = new PermissionRequestResult();
+            result.setKind(PermissionRequestResultKind.USER_NOT_AVAILABLE);
+            return CompletableFuture.completedFuture(result);
+        }
+
+        try {
+            PermissionRequest request = MAPPER.treeToValue(permissionRequestData, PermissionRequest.class);
+            var invocation = new PermissionInvocation();
+            invocation.setSessionId(sessionId);
+            invocation.setManagedSettingsEnabled(managedSettingsEnabled);
+            return handler.handle(request, invocation).exceptionally(ex -> {
+                LOG.log(Level.SEVERE, "Permission handler threw an exception", ex);
+                PermissionRequestResult result = new PermissionRequestResult();
+                result.setKind(PermissionRequestResultKind.USER_NOT_AVAILABLE);
+                return result;
+            });
+        } catch (Exception e) {
+            LOG.log(Level.SEVERE, "Failed to process permission request", e);
+            PermissionRequestResult result = new PermissionRequestResult();
+            result.setKind(PermissionRequestResultKind.USER_NOT_AVAILABLE);
+            return CompletableFuture.completedFuture(result);
+        }
+    }
+
+    /**
+     * Registers a handler for user input requests.
+     * <p>
+     * Called internally when creating or resuming a session with user input
+     * handling.
+     *
+     * @param handler
+     *            the user input handler
+     */
+    void registerUserInputHandler(UserInputHandler handler) {
+        userInputHandler.set(handler);
+    }
+
+    /**
+     * Registers command handlers for this session.
+     * <p>
+     * Called internally when creating or resuming a session with commands.
+     *
+     * @param commands
+     *            the command definitions to register
+     */
+    void registerCommands(java.util.List<CommandDefinition> commands) {
+        commandHandlers.clear();
+        if (commands != null) {
+            for (CommandDefinition cmd : commands) {
+                if (cmd.getName() != null && cmd.getHandler() != null) {
+                    commandHandlers.put(cmd.getName(), cmd.getHandler());
+                }
+            }
+        }
+    }
+
+    /**
+     * Registers an elicitation handler for this session.
+     * <p>
+     * Called internally when creating or resuming a session with an elicitation
+     * handler.
+     *
+     * @param handler
+     *            the handler to invoke when an elicitation request is received
+     */
+    void registerElicitationHandler(ElicitationHandler handler) {
+        elicitationHandler.set(handler);
+    }
+
+    /**
+     * Registers bearer-token provider callbacks for this session.
+     * <p>
+     * Called internally when creating or resuming a session with BYOK providers
+     * that use managed-identity token callbacks.
+     *
+     * @param providers
+     *            the callbacks keyed by provider name
+     */
+    void registerBearerTokenProviders(Map<String, BearerTokenProvider> providers) {
+        bearerTokenProviders.clear();
+        if (providers != null) {
+            bearerTokenProviders.putAll(providers);
+        }
+    }
+
+    /**
+     * Gets the bearer-token provider callback for the given provider name.
+     *
+     * @param providerName
+     *            the provider name
+     * @return the registered callback, or {@code null} if none is registered
+     */
+    BearerTokenProvider getBearerTokenProvider(String providerName) {
+        return bearerTokenProviders.get(providerName);
+    }
+
+    /**
+     * Registers an exit-plan-mode handler for this session.
+     * <p>
+     * Called internally when creating or resuming a session with an exit-plan-mode
+     * handler.
+     *
+     * @param handler
+     *            the handler to invoke when an exit-plan-mode request is received
+     */
+    void registerExitPlanModeHandler(ExitPlanModeHandler handler) {
+        exitPlanModeHandler.set(handler);
+    }
+
+    /**
+     * Registers an auto-mode-switch handler for this session.
+     * <p>
+     * Called internally when creating or resuming a session with an
+     * auto-mode-switch handler.
+     *
+     * @param handler
+     *            the handler to invoke when an auto-mode-switch request is received
+     */
+    void registerAutoModeSwitchHandler(AutoModeSwitchHandler handler) {
+        autoModeSwitchHandler.set(handler);
+    }
+
+    /**
+     * Sets the capabilities reported by the host for this session.
+     * <p>
+     * Called internally after session create/resume response.
+     *
+     * @param sessionCapabilities
+     *            the capabilities to set, or {@code null} for empty capabilities
+     */
+    void setCapabilities(SessionCapabilities sessionCapabilities) {
+        this.capabilities = sessionCapabilities != null ? sessionCapabilities : new SessionCapabilities();
+    }
+
+    /**
+     * Returns a snapshot of the canvas instances currently known to be open for
+     * this session.
+     * <p>
+     * The snapshot is seeded from the {@code session.create} /
+     * {@code session.resume} response and kept up to date by
+     * {@code session.canvas.opened} (upsert) and {@code session.canvas.closed}
+     * (remove) events. The returned list is an immutable defensive copy; mutating
+     * it has no effect on the session.
+     *
+     * @return an immutable list of the currently open canvas instances, never
+     *         {@code null}
+     * @since 1.0.1
+     */
+    public List<OpenCanvasInstance> getOpenCanvases() {
+        synchronized (openCanvasesLock) {
+            return List.copyOf(openCanvases);
+        }
+    }
+
+    /**
+     * Replaces the open-canvases snapshot for this session.
+     * <p>
+     * Called internally after a {@code session.create} / {@code session.resume}
+     * response to seed the snapshot. {@code null} entries are ignored.
+     *
+     * @param instances
+     *            the open canvas instances from the create/resume response, or
+     *            {@code null} to clear the snapshot
+     */
+    void setOpenCanvases(List<OpenCanvasInstance> instances) {
+        synchronized (openCanvasesLock) {
+            openCanvases.clear();
+            if (instances != null) {
+                for (OpenCanvasInstance instance : instances) {
+                    if (instance != null) {
+                        openCanvases.add(instance);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Updates the in-memory open-canvases snapshot in response to a session event.
+     * <p>
+     * {@code session.canvas.opened} upserts by {@code instanceId}; a stale re-emit
+     * (provider unregister) arrives as another {@code opened} event and replaces
+     * the prior entry rather than removing it. {@code session.canvas.closed}
+     * removes the matching entry. Invalid payloads are logged and ignored.
+     *
+     * @param event
+     *            the dispatched session event
+     */
+    private void updateOpenCanvasesFromEvent(SessionEvent event) {
+        if (event instanceof SessionCanvasClosedEvent closedEvent) {
+            var data = closedEvent.getData();
+            if (data == null || isNullOrEmpty(data.instanceId())) {
+                LOG.warning("failed to deserialize session.canvas.closed payload");
+                return;
+            }
+            removeOpenCanvas(data.instanceId());
+            return;
+        }
+
+        if (event instanceof SessionCanvasOpenedEvent openedEvent) {
+            var data = openedEvent.getData();
+            if (data == null || isNullOrEmpty(data.instanceId()) || isNullOrEmpty(data.canvasId())
+                    || isNullOrEmpty(data.extensionId())) {
+                LOG.warning("failed to deserialize session.canvas.opened payload");
+                return;
+            }
+            upsertOpenCanvas(new OpenCanvasInstance(data.instanceId(), data.extensionId(), data.extensionName(),
+                    data.canvasId(), data.icon(), data.title(), data.status(), data.url(), data.input()));
+        }
+    }
+
+    /**
+     * Inserts or replaces a canvas instance in the snapshot, matching by
+     * {@code instanceId}.
+     */
+    private void upsertOpenCanvas(OpenCanvasInstance instance) {
+        synchronized (openCanvasesLock) {
+            for (int i = 0; i < openCanvases.size(); i++) {
+                if (instance.instanceId().equals(openCanvases.get(i).instanceId())) {
+                    openCanvases.set(i, instance);
+                    return;
+                }
+            }
+            openCanvases.add(instance);
+        }
+    }
+
+    /**
+     * Removes the canvas instance matching {@code instanceId} from the snapshot.
+     * Idempotent: removing an absent instance is a no-op.
+     */
+    private void removeOpenCanvas(String instanceId) {
+        synchronized (openCanvasesLock) {
+            openCanvases.removeIf(open -> instanceId.equals(open.instanceId()));
+        }
+    }
+
+    private static boolean isNullOrEmpty(String value) {
+        return value == null || value.isEmpty();
+    }
+
+    /**
+     * Handles a user input request from the Copilot CLI.
+     * <p>
+     * Called internally when the server requests user input.
+     *
+     * @param request
+     *            the user input request
+     * @return a future that resolves with the user input response
+     */
+    CompletableFuture<UserInputResponse> handleUserInputRequest(UserInputRequest request) {
+        UserInputHandler handler = userInputHandler.get();
+        if (handler == null) {
+            return CompletableFuture.failedFuture(new IllegalStateException("No user input handler registered"));
+        }
+
+        try {
+            var invocation = new UserInputInvocation().setSessionId(sessionId);
+            return handler.handle(request, invocation).exceptionally(ex -> {
+                LOG.log(Level.SEVERE, "User input handler threw an exception", ex);
+                throw new RuntimeException("User input handler error", ex);
+            });
+        } catch (Exception e) {
+            LOG.log(Level.SEVERE, "Failed to process user input request", e);
+            return CompletableFuture.failedFuture(e);
+        }
+    }
+
+    /**
+     * Handles an exit-plan-mode request from the Copilot CLI.
+     * <p>
+     * Called internally when the server sends an {@code exitPlanMode.request}.
+     *
+     * @param request
+     *            the exit-plan-mode request
+     * @return a future that resolves with the user's decision
+     */
+    CompletableFuture<ExitPlanModeResult> handleExitPlanModeRequest(ExitPlanModeRequest request) {
+        ExitPlanModeHandler handler = exitPlanModeHandler.get();
+        if (handler == null) {
+            return CompletableFuture.completedFuture(new ExitPlanModeResult().setApproved(true));
+        }
+
+        try {
+            var invocation = new ExitPlanModeInvocation().setSessionId(sessionId);
+            return handler.handle(request, invocation).exceptionally(ex -> {
+                LOG.log(Level.SEVERE, "Exit plan mode handler threw an exception", ex);
+                throw new RuntimeException("Exit plan mode handler error", ex);
+            });
+        } catch (Exception e) {
+            LOG.log(Level.SEVERE, "Failed to process exit plan mode request", e);
+            return CompletableFuture.failedFuture(e);
+        }
+    }
+
+    /**
+     * Handles an auto-mode-switch request from the Copilot CLI.
+     * <p>
+     * Called internally when the server sends an {@code autoModeSwitch.request}.
+     *
+     * @param request
+     *            the auto-mode-switch request
+     * @return a future that resolves with the user's decision
+     */
+    CompletableFuture<AutoModeSwitchResponse> handleAutoModeSwitchRequest(AutoModeSwitchRequest request) {
+        AutoModeSwitchHandler handler = autoModeSwitchHandler.get();
+        if (handler == null) {
+            return CompletableFuture.completedFuture(AutoModeSwitchResponse.NO);
+        }
+
+        try {
+            var invocation = new AutoModeSwitchInvocation().setSessionId(sessionId);
+            return handler.handle(request, invocation).exceptionally(ex -> {
+                LOG.log(Level.SEVERE, "Auto mode switch handler threw an exception", ex);
+                throw new RuntimeException("Auto mode switch handler error", ex);
+            });
+        } catch (Exception e) {
+            LOG.log(Level.SEVERE, "Failed to process auto mode switch request", e);
+            return CompletableFuture.failedFuture(e);
+        }
+    }
+
+    /**
+     * Registers hook handlers for this session.
+     * <p>
+     * Called internally when creating or resuming a session with hooks.
+     *
+     * @param hooks
+     *            the hooks configuration
+     */
+    void registerHooks(SessionHooks hooks) {
+        hooksHandler.set(hooks);
+    }
+
+    /**
+     * Registers transform callbacks for system message sections.
+     * <p>
+     * Called internally when creating or resuming a session with
+     * {@link com.github.copilot.SystemMessageMode#CUSTOMIZE} and transform
+     * callbacks.
+     *
+     * @param callbacks
+     *            the transform callbacks keyed by section identifier; {@code null}
+     *            clears any previously registered callbacks
+     */
+    void registerTransformCallbacks(
+            Map<String, java.util.function.Function<String, CompletableFuture<String>>> callbacks) {
+        this.transformCallbacks = callbacks;
+    }
+
+    /**
+     * Handles a {@code systemMessage.transform} RPC call from the Copilot CLI.
+     * <p>
+     * The CLI sends section content; the SDK invokes the registered transform
+     * callbacks and returns the transformed sections.
+     *
+     * @param sections
+     *            JSON node containing sections keyed by section identifier
+     * @return a future resolving with a map of transformed sections
+     */
+    CompletableFuture<Map<String, Object>> handleSystemMessageTransform(JsonNode sections) {
+        var callbacks = this.transformCallbacks;
+        var result = new java.util.LinkedHashMap<String, Object>();
+        var futures = new ArrayList<CompletableFuture<Void>>();
+
+        if (sections != null && sections.isObject()) {
+            sections.fields().forEachRemaining(entry -> {
+                String sectionId = entry.getKey();
+                String content = entry.getValue().has("content") ? entry.getValue().get("content").asText("") : "";
+
+                java.util.function.Function<String, CompletableFuture<String>> cb = callbacks != null
+                        ? callbacks.get(sectionId)
+                        : null;
+
+                if (cb != null) {
+                    CompletableFuture<Void> f = cb.apply(content).exceptionally(ex -> content)
+                            .thenAccept(transformed -> {
+                                synchronized (result) {
+                                    result.put(sectionId, Map.of("content", transformed != null ? transformed : ""));
+                                }
+                            });
+                    futures.add(f);
+                } else {
+                    result.put(sectionId, Map.of("content", content));
+                }
+            });
+        }
+
+        return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).thenApply(v -> {
+            Map<String, Object> response = new java.util.LinkedHashMap<>();
+            response.put("sections", result);
+            return response;
+        });
+    }
+
+    /**
+     * Handles a hook invocation from the Copilot CLI.
+     * <p>
+     * Called internally when the server invokes a hook.
+     *
+     * @param hookType
+     *            the type of hook to invoke
+     * @param input
+     *            the hook input data
+     * @return a future that resolves with the hook output
+     */
+    CompletableFuture<Object> handleHooksInvoke(String hookType, JsonNode input) {
+        SessionHooks hooks = hooksHandler.get();
+        if (hooks == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        var invocation = new HookInvocation().setSessionId(sessionId);
+
+        try {
+            switch (hookType) {
+                case "preToolUse" :
+                    if (hooks.getOnPreToolUse() != null) {
+                        PreToolUseHookInput preInput = MAPPER.treeToValue(input, PreToolUseHookInput.class);
+                        var preResult = hooks.getOnPreToolUse().handle(preInput, invocation);
+                        if (preResult == null) {
+                            return CompletableFuture.completedFuture(null);
+                        }
+                        return preResult.thenApply(output -> (Object) output);
+                    }
+                    break;
+                case "preMcpToolCall" :
+                    if (hooks.getOnPreMcpToolCall() != null) {
+                        PreMcpToolCallHookInput mcpInput = MAPPER.treeToValue(input, PreMcpToolCallHookInput.class);
+                        var mcpResult = hooks.getOnPreMcpToolCall().handle(mcpInput, invocation);
+                        if (mcpResult == null) {
+                            return CompletableFuture.completedFuture(null);
+                        }
+                        return mcpResult.thenApply(output -> (Object) output);
+                    }
+                    break;
+                case "postToolUse" :
+                    if (hooks.getOnPostToolUse() != null) {
+                        PostToolUseHookInput postInput = MAPPER.treeToValue(input, PostToolUseHookInput.class);
+                        var postResult = hooks.getOnPostToolUse().handle(postInput, invocation);
+                        if (postResult == null) {
+                            return CompletableFuture.completedFuture(null);
+                        }
+                        return postResult.thenApply(output -> (Object) output);
+                    }
+                    break;
+                case "postToolUseFailure" :
+                    if (hooks.getOnPostToolUseFailure() != null) {
+                        PostToolUseFailureHookInput failureInput = MAPPER.treeToValue(input,
+                                PostToolUseFailureHookInput.class);
+                        var failureResult = hooks.getOnPostToolUseFailure().handle(failureInput, invocation);
+                        if (failureResult == null) {
+                            return CompletableFuture.completedFuture(null);
+                        }
+                        return failureResult.thenApply(output -> (Object) output);
+                    }
+                    break;
+                case "userPromptSubmitted" :
+                    if (hooks.getOnUserPromptSubmitted() != null) {
+                        UserPromptSubmittedHookInput promptInput = MAPPER.treeToValue(input,
+                                UserPromptSubmittedHookInput.class);
+                        var promptResult = hooks.getOnUserPromptSubmitted().handle(promptInput, invocation);
+                        if (promptResult == null) {
+                            return CompletableFuture.completedFuture(null);
+                        }
+                        return promptResult.thenApply(output -> (Object) output);
+                    }
+                    break;
+                case "userPromptTransformed" :
+                    if (hooks.getOnUserPromptTransformed() != null) {
+                        UserPromptTransformedHookInput transformedInput = MAPPER.treeToValue(input,
+                                UserPromptTransformedHookInput.class);
+                        var transformedResult = hooks.getOnUserPromptTransformed().handle(transformedInput, invocation);
+                        if (transformedResult == null) {
+                            return CompletableFuture.completedFuture(null);
+                        }
+                        return transformedResult.thenApply(output -> (Object) output);
+                    }
+                    break;
+                case "sessionStart" :
+                    if (hooks.getOnSessionStart() != null) {
+                        SessionStartHookInput startInput = MAPPER.treeToValue(input, SessionStartHookInput.class);
+                        var startResult = hooks.getOnSessionStart().handle(startInput, invocation);
+                        if (startResult == null) {
+                            return CompletableFuture.completedFuture(null);
+                        }
+                        return startResult.thenApply(output -> (Object) output);
+                    }
+                    break;
+                case "sessionEnd" :
+                    if (hooks.getOnSessionEnd() != null) {
+                        SessionEndHookInput endInput = MAPPER.treeToValue(input, SessionEndHookInput.class);
+                        var endResult = hooks.getOnSessionEnd().handle(endInput, invocation);
+                        if (endResult == null) {
+                            return CompletableFuture.completedFuture(null);
+                        }
+                        return endResult.thenApply(output -> (Object) output);
+                    }
+                    break;
+                case "agentStop" :
+                    if (hooks.getOnAgentStop() != null) {
+                        AgentStopHookInput stopInput = MAPPER.treeToValue(input, AgentStopHookInput.class);
+                        var stopResult = hooks.getOnAgentStop().handle(stopInput, invocation);
+                        if (stopResult == null) {
+                            return CompletableFuture.completedFuture(null);
+                        }
+                        return stopResult.thenApply(output -> (Object) output);
+                    }
+                    break;
+                case "subagentStart" :
+                    if (hooks.getOnSubagentStart() != null) {
+                        SubagentStartHookInput startInput = MAPPER.treeToValue(input, SubagentStartHookInput.class);
+                        var startResult = hooks.getOnSubagentStart().handle(startInput, invocation);
+                        if (startResult == null) {
+                            return CompletableFuture.completedFuture(null);
+                        }
+                        return startResult.thenApply(output -> (Object) output);
+                    }
+                    break;
+                case "subagentStop" :
+                    if (hooks.getOnSubagentStop() != null) {
+                        SubagentStopHookInput stopInput = MAPPER.treeToValue(input, SubagentStopHookInput.class);
+                        var stopResult = hooks.getOnSubagentStop().handle(stopInput, invocation);
+                        if (stopResult == null) {
+                            return CompletableFuture.completedFuture(null);
+                        }
+                        return stopResult.thenApply(output -> (Object) output);
+                    }
+                    break;
+                default :
+                    LOG.fine("Unhandled hook type: " + hookType);
+            }
+        } catch (Exception e) {
+            LOG.log(Level.SEVERE, "Failed to process hook invocation", e);
+            return CompletableFuture.failedFuture(e);
+        }
+
+        return CompletableFuture.completedFuture(null);
+    }
+
+    /**
+     * Gets the complete list of messages and events in the session.
+     * <p>
+     * This retrieves the full conversation history, including all user messages,
+     * assistant responses, tool invocations, and other session events.
+     *
+     * @return a future that resolves with a list of all session events
+     * @throws IllegalStateException
+     *             if this session has been terminated
+     * @see SessionEvent
+     */
+    public CompletableFuture<List<SessionEvent>> getMessages() {
+        ensureNotTerminated();
+        return rpc.invoke("session.getMessages", Map.of("sessionId", sessionId), GetMessagesResponse.class)
+                .thenApply(response -> {
+                    var events = new ArrayList<SessionEvent>();
+                    if (response.events() != null) {
+                        for (JsonNode eventNode : response.events()) {
+                            try {
+                                SessionEvent event = MAPPER.treeToValue(eventNode, SessionEvent.class);
+                                if (event != null) {
+                                    events.add(event);
+                                }
+                            } catch (Exception e) {
+                                LOG.log(Level.WARNING, "Failed to parse event", e);
+                            }
+                        }
+                    }
+                    return events;
+                });
+    }
+
+    /**
+     * Aborts the currently processing message in this session.
+     * <p>
+     * Use this to cancel a long-running operation or stop the assistant from
+     * continuing to generate a response.
+     *
+     * @return a future that completes when the abort is acknowledged
+     * @throws IllegalStateException
+     *             if this session has been terminated
+     */
+    public CompletableFuture<Void> abort() {
+        ensureNotTerminated();
+        return rpc.invoke("session.abort", Map.of("sessionId", sessionId), Void.class);
+    }
+
+    /**
+     * Changes the model for this session with an optional reasoning effort level.
+     * <p>
+     * The new model takes effect for the next message. Conversation history is
+     * preserved.
+     *
+     * <pre>{@code
+     * session.setModel("gpt-5.4").get();
+     * session.setModel("claude-sonnet-4.6", "high").get();
+     * }</pre>
+     *
+     * @param model
+     *            the model ID to switch to (e.g., {@code "gpt-5.4"})
+     * @param reasoningEffort
+     *            reasoning effort level (e.g., {@code "low"}, {@code "medium"},
+     *            {@code "high"}, {@code "xhigh"}, {@code "max"}); {@code null} to
+     *            use default
+     * @return a future that completes when the model switch is acknowledged
+     * @throws IllegalStateException
+     *             if this session has been terminated
+     * @since 1.0.0
+     */
+    public CompletableFuture<Void> setModel(String model, String reasoningEffort) {
+        ensureNotTerminated();
+        return getRpc().model.switchTo(new SessionModelSwitchToParams(sessionId, model, null, reasoningEffort, null,
+                null, null, null, null, null, null, null, null, null, null, null)).thenApply(r -> null);
+    }
+
+    /**
+     * Changes the model for this session with optional reasoning effort and
+     * capability overrides.
+     * <p>
+     * The new model takes effect for the next message. Conversation history is
+     * preserved.
+     *
+     * <pre>{@code
+     * session.setModel("claude-sonnet-4.5", null,
+     * 		new ModelCapabilitiesOverride().setSupports(new ModelCapabilitiesOverride.Supports().setVision(false)))
+     * 		.get();
+     * }</pre>
+     *
+     * @param model
+     *            the model ID to switch to (e.g., {@code "gpt-5.4"})
+     * @param reasoningEffort
+     *            reasoning effort level (e.g., {@code "low"}, {@code "medium"},
+     *            {@code "high"}, {@code "xhigh"}, {@code "max"}); {@code null} to
+     *            use default
+     * @param modelCapabilities
+     *            per-property overrides for model capabilities; {@code null} to use
+     *            runtime defaults
+     * @return a future that completes when the model switch is acknowledged
+     * @throws IllegalStateException
+     *             if this session has been terminated
+     * @since 1.3.0
+     */
+    public CompletableFuture<Void> setModel(String model, String reasoningEffort,
+            com.github.copilot.rpc.ModelCapabilitiesOverride modelCapabilities) {
+        return setModel(model, reasoningEffort, null, modelCapabilities);
+    }
+
+    /**
+     * Changes the model for this session with optional reasoning effort, reasoning
+     * summary mode, and capability overrides.
+     * <p>
+     * The new model takes effect for the next message. Conversation history is
+     * preserved.
+     *
+     * @param model
+     *            the model ID to switch to (e.g., {@code "gpt-5.4"})
+     * @param reasoningEffort
+     *            reasoning effort level; {@code null} to use default
+     * @param reasoningSummary
+     *            reasoning summary mode ({@code "none"}, {@code "concise"}, or
+     *            {@code "detailed"}); {@code null} to use default. Use
+     *            {@code "none"} to suppress summary output regardless of whether
+     *            reasoning is enabled.
+     * @param modelCapabilities
+     *            per-property overrides for model capabilities; {@code null} to use
+     *            runtime defaults
+     * @return a future that completes when the model switch is acknowledged
+     * @throws IllegalStateException
+     *             if this session has been terminated
+     * @since 1.3.0
+     */
+    public CompletableFuture<Void> setModel(String model, String reasoningEffort, String reasoningSummary,
+            com.github.copilot.rpc.ModelCapabilitiesOverride modelCapabilities) {
+        ensureNotTerminated();
+        ModelCapabilitiesOverride generatedCapabilities = toGeneratedCapabilities(modelCapabilities);
+        var generatedReasoningSummary = reasoningSummary == null
+                ? null
+                : com.github.copilot.generated.rpc.ReasoningSummary.fromValue(reasoningSummary);
+        return getRpc().model.switchTo(
+                new SessionModelSwitchToParams(sessionId, model, null, reasoningEffort, generatedReasoningSummary, null,
+                        generatedCapabilities, null, null, null, null, null, null, null, null, null))
+                .thenApply(r -> null);
+    }
+
+    private static ModelCapabilitiesOverride toGeneratedCapabilities(
+            com.github.copilot.rpc.ModelCapabilitiesOverride modelCapabilities) {
+        if (modelCapabilities == null) {
+            return null;
+        }
+        ModelCapabilitiesOverrideSupports supports = null;
+        if (modelCapabilities.getSupports() != null) {
+            var s = modelCapabilities.getSupports();
+            supports = new ModelCapabilitiesOverrideSupports(s.getVision().orElse(null), null,
+                    s.getReasoningEffort().orElse(null), null);
+        }
+        ModelCapabilitiesOverrideLimits limits = null;
+        if (modelCapabilities.getLimits() != null) {
+            limits = MAPPER.convertValue(modelCapabilities.getLimits(), ModelCapabilitiesOverrideLimits.class);
+        }
+        return new ModelCapabilitiesOverride(supports, limits);
+    }
+
+    private static com.github.copilot.generated.rpc.AutoTier toGeneratedAutoTier(
+            com.github.copilot.rpc.AutoTier autoTier) {
+        return autoTier == null ? null : com.github.copilot.generated.rpc.AutoTier.fromValue(autoTier.getValue());
+    }
+
+    /**
+     * Changes the model for this session using an options object.
+     * <p>
+     * The new model takes effect for the next message. Conversation history is
+     * preserved. Use {@link com.github.copilot.rpc.SetModelOptions#setAutoTier} to
+     * request an Auto routing preference at the same time, which the runtime
+     * accepts only when the model is {@code "auto"}.
+     *
+     * <pre>{@code
+     * session.setModel(new SetModelOptions().setModel("auto").setAutoTier(AutoTier.INTELLIGENCE)).get();
+     * session.setModel(new SetModelOptions().setModel("auto").setResetAutoTier(true)).get();
+     * }</pre>
+     *
+     * @param options
+     *            the switch settings; the model ID is required
+     * @return a future that completes when the model switch is acknowledged
+     * @throws IllegalArgumentException
+     *             if {@code options} is {@code null}, if it carries no model ID, or
+     *             if it requests both an explicit Auto tier and a return to
+     *             provider-default Auto routing
+     * @throws IllegalStateException
+     *             if this session has been terminated
+     * @since 1.6.0
+     */
+    public CompletableFuture<Void> setModel(com.github.copilot.rpc.SetModelOptions options) {
+        ensureNotTerminated();
+        if (options == null) {
+            throw new IllegalArgumentException("options must not be null");
+        }
+        if (options.getModel() == null) {
+            throw new IllegalArgumentException("options must specify a model");
+        }
+        if (options.getAutoTier() != null && options.isResetAutoTier()) {
+            throw new IllegalArgumentException(
+                    "setModel cannot combine an explicit autoTier with resetAutoTier; choose one");
+        }
+        var generatedReasoningSummary = options.getReasoningSummary() == null
+                ? null
+                : com.github.copilot.generated.rpc.ReasoningSummary.fromValue(options.getReasoningSummary());
+        var params = new SessionModelSwitchToParams(sessionId, options.getModel(),
+                toGeneratedAutoTier(options.getAutoTier()), options.getReasoningEffort(), generatedReasoningSummary,
+                null, toGeneratedCapabilities(options.getModelCapabilities()), null, null, null, null, null, null, null,
+                null, null);
+        if (!options.isResetAutoTier()) {
+            return getRpc().model.switchTo(params).thenApply(r -> null);
+        }
+        // The generated params record omits null properties, but returning to
+        // provider-default Auto routing requires sending an explicit null tier, so
+        // build the payload directly and reinstate the null.
+        ObjectNode payload = MAPPER.valueToTree(params);
+        payload.putNull("autoTier");
+        return rpc.invoke("session.model.switchTo", payload, Void.class);
+    }
+
+    /**
+     * Changes the Auto routing preference without changing the selected model.
+     * <p>
+     * The runtime does not apply the preference immediately. It records the request
+     * and commits it only when a later user turn using the {@code auto} model
+     * successfully obtains a usable model from the provider. A {@code pending}
+     * status therefore confirms that the request was accepted, not that it took
+     * effect.
+     * <p>
+     * Watch for the outcome through the {@code session.model_change} event on
+     * success, or the ephemeral {@code session.auto_tier_switch_failed} event on
+     * failure. You can also read the committed and in-flight state at any time with
+     * {@code session.getRpc().model.getCurrent()}.
+     * <p>
+     * Only the most recent request survives: a new request replaces any earlier one
+     * that no turn has claimed yet.
+     *
+     * <pre>{@code
+     * var result = session.setAutoTier(AutoTier.INTELLIGENCE).get();
+     * if (result.status() == ModelSwitchAutoTierStatus.PENDING) {
+     * 	// Takes effect on a later turn that uses the `auto` model.
+     * }
+     * }</pre>
+     *
+     * @param autoTier
+     *            the routing preference to activate, or {@code null} to return to
+     *            the provider's default Auto routing
+     * @return a future completing with the runtime's immediate acknowledgement and
+     *         Auto preference snapshot
+     * @throws IllegalStateException
+     *             if this session has been terminated
+     * @since 1.6.0
+     */
+    @CopilotExperimental
+    public CompletableFuture<SessionModelSwitchAutoTierResult> setAutoTier(com.github.copilot.rpc.AutoTier autoTier) {
+        ensureNotTerminated();
+        var params = new SessionModelSwitchAutoTierParams(sessionId, toGeneratedAutoTier(autoTier), null);
+        if (autoTier != null) {
+            return getRpc().model.switchAutoTier(params);
+        }
+        // The generated params record omits null properties, but the runtime
+        // distinguishes an explicit null tier (return to provider-default routing)
+        // from an absent one, so build the payload directly and reinstate the null.
+        ObjectNode payload = MAPPER.valueToTree(params);
+        payload.putNull("autoTier");
+        return rpc.invoke("session.model.switchAutoTier", payload, SessionModelSwitchAutoTierResult.class);
+    }
+
+    /**
+     * Changes the model for this session.
+     * <p>
+     * The new model takes effect for the next message. Conversation history is
+     * preserved.
+     *
+     * <pre>{@code
+     * session.setModel("gpt-5.4").get();
+     * }</pre>
+     *
+     * @param model
+     *            the model ID to switch to (e.g., {@code "gpt-5.4"})
+     * @return a future that completes when the model switch is acknowledged
+     * @throws IllegalStateException
+     *             if this session has been terminated
+     * @since 1.0.11
+     */
+    public CompletableFuture<Void> setModel(String model) {
+        return setModel(model, null);
+    }
+
+    /**
+     * Logs a message to the session timeline.
+     * <p>
+     * The message appears in the session event stream and is visible to SDK
+     * consumers. Non-ephemeral messages are also persisted to the session event log
+     * on disk.
+     *
+     * <h2>Example Usage</h2>
+     *
+     * <pre>{@code
+     * session.log("Build completed successfully").get();
+     * session.log("Disk space low", "warning", null).get();
+     * session.log("Temporary status", null, true).get();
+     * session.log("Details at link", "info", null, "https://example.com").get();
+     * }</pre>
+     *
+     * @param message
+     *            the message to log
+     * @param level
+     *            the log severity level ({@code "info"}, {@code "warning"},
+     *            {@code "error"}), or {@code null} to use the default
+     *            ({@code "info"})
+     * @param ephemeral
+     *            when {@code true}, the message is transient and not persisted to
+     *            disk; {@code null} uses default behavior
+     * @param url
+     *            optional URL to associate with the log entry; {@code null} to omit
+     * @return a future that completes when the message is logged
+     * @throws IllegalStateException
+     *             if this session has been terminated
+     * @since 1.0.0
+     */
+    public CompletableFuture<Void> log(String message, String level, Boolean ephemeral, String url) {
+        ensureNotTerminated();
+        SessionLogLevel rpcLevel = null;
+        if (level != null) {
+            try {
+                rpcLevel = SessionLogLevel.fromValue(level);
+            } catch (IllegalArgumentException e) {
+                rpcLevel = SessionLogLevel.INFO;
+            }
+        }
+        return getRpc().log(new SessionLogParams(sessionId, message, rpcLevel, null, ephemeral, url, null))
+                .thenApply(r -> null);
+    }
+
+    /**
+     * Logs a message to the session timeline.
+     * <p>
+     * The message appears in the session event stream and is visible to SDK
+     * consumers. Non-ephemeral messages are also persisted to the session event log
+     * on disk.
+     *
+     * <h2>Example Usage</h2>
+     *
+     * <pre>{@code
+     * session.log("Build completed successfully").get();
+     * session.log("Disk space low", "warning", null).get();
+     * session.log("Temporary status", null, true).get();
+     * }</pre>
+     *
+     * @param message
+     *            the message to log
+     * @param level
+     *            the log severity level ({@code "info"}, {@code "warning"},
+     *            {@code "error"}), or {@code null} to use the default
+     *            ({@code "info"})
+     * @param ephemeral
+     *            when {@code true}, the message is transient and not persisted to
+     *            disk; {@code null} uses default behavior
+     * @return a future that completes when the message is logged
+     * @throws IllegalStateException
+     *             if this session has been terminated
+     */
+    public CompletableFuture<Void> log(String message, String level, Boolean ephemeral) {
+        return log(message, level, ephemeral, null);
+    }
+
+    /**
+     * Logs an informational message to the session timeline.
+     *
+     * @param message
+     *            the message to log
+     * @return a future that completes when the message is logged
+     * @throws IllegalStateException
+     *             if this session has been terminated
+     */
+    public CompletableFuture<Void> log(String message) {
+        return log(message, null, null);
+    }
+
+    /**
+     * Lists the custom agents available for selection in this session.
+     *
+     * @return a future that resolves with the list of available agents
+     * @throws IllegalStateException
+     *             if this session has been terminated
+     * @since 1.0.11
+     */
+    public CompletableFuture<List<AgentInfo>> listAgents() {
+        ensureNotTerminated();
+        return rpc.invoke("session.agent.list", Map.of("sessionId", sessionId), AgentListResponse.class)
+                .thenApply(response -> response.agents() != null
+                        ? Collections.unmodifiableList(response.agents())
+                        : Collections.emptyList());
+    }
+
+    /**
+     * Gets the currently selected custom agent for this session, or {@code null} if
+     * no custom agent is selected.
+     *
+     * @return a future that resolves with the current agent, or {@code null} if
+     *         using the default agent
+     * @throws IllegalStateException
+     *             if this session has been terminated
+     * @since 1.0.11
+     */
+    public CompletableFuture<AgentInfo> getCurrentAgent() {
+        ensureNotTerminated();
+        return rpc.invoke("session.agent.getCurrent", Map.of("sessionId", sessionId), AgentGetCurrentResponse.class)
+                .thenApply(AgentGetCurrentResponse::agent);
+    }
+
+    /**
+     * Selects a custom agent for this session.
+     *
+     * @param agentName
+     *            the name/identifier of the agent to select
+     * @return a future that resolves with the selected agent information
+     * @throws IllegalStateException
+     *             if this session has been terminated
+     * @since 1.0.11
+     */
+    public CompletableFuture<AgentInfo> selectAgent(String agentName) {
+        ensureNotTerminated();
+        return rpc.invoke("session.agent.select", Map.of("sessionId", sessionId, "name", agentName),
+                AgentSelectResponse.class).thenApply(AgentSelectResponse::agent);
+    }
+
+    /**
+     * Deselects the currently selected custom agent, returning to the default
+     * agent.
+     *
+     * @return a future that completes when the agent is deselected
+     * @throws IllegalStateException
+     *             if this session has been terminated
+     * @since 1.0.11
+     */
+    public CompletableFuture<Void> deselectAgent() {
+        ensureNotTerminated();
+        return rpc.invoke("session.agent.deselect", Map.of("sessionId", sessionId), Void.class);
+    }
+
+    /**
+     * Compacts the session context to reduce token usage.
+     * <p>
+     * This triggers an immediate session compaction, summarizing the conversation
+     * history to free up context window space.
+     *
+     * @return a future that completes when compaction finishes
+     * @throws IllegalStateException
+     *             if this session has been terminated
+     * @since 1.0.11
+     */
+    public CompletableFuture<Void> compact() {
+        ensureNotTerminated();
+        return rpc.invoke("session.compaction.compact", Map.of("sessionId", sessionId), Void.class);
+    }
+
+    /**
+     * Verifies that this session has not yet been terminated.
+     *
+     * @throws IllegalStateException
+     *             if close() has already been invoked
+     */
+    private void ensureNotTerminated() {
+        if (isTerminated) {
+            throw new IllegalStateException("Session is closed");
+        }
+    }
+
+    /**
+     * Disposes the session and releases all associated resources.
+     * <p>
+     * This destroys the session on the server, clears all event handlers, and
+     * releases tool and permission handlers. After calling this method, the session
+     * cannot be used again. Subsequent calls to this method have no effect. Pending
+     * response waits fail when the session retires; ordinary callbacks remain
+     * active until the detach acknowledgement.
+     */
+    @Override
+    public void close() {
+        if (!retire(false)) {
+            return;
+        }
+
+        RuntimeException detachFailure = null;
+        try {
+            SessionDetachResponse response = rpc
+                    .invoke("session.detach", Map.of("sessionId", sessionId), SessionDetachResponse.class)
+                    .get(5, TimeUnit.SECONDS);
+            if (response == null || !response.success()) {
+                String detail = response != null && response.error() != null ? response.error() : "unknown error";
+                detachFailure = new IllegalStateException("Failed to detach session " + sessionId + ": " + detail);
+            }
+        } catch (Exception e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            detachFailure = new IllegalStateException("Failed to detach session " + sessionId, e);
+        } finally {
+            retireCallbacks();
+        }
+
+        if (detachFailure != null) {
+            throw detachFailure;
+        }
+    }
+
+    /**
+     * Retires a tracked session without an RPC or joining admitted user handlers.
+     */
+    void forceStopLocally() {
+        retire(true);
+    }
+
+    private boolean retire(boolean force) {
+        List<Runnable> waitCompletions = new ArrayList<>();
+        synchronized (this) {
+            if (isTerminated) {
+                if (force) {
+                    retireCallbacks();
+                }
+                return false;
+            }
+            isTerminated = true;
+            structuredWaits.forEach(wait -> waitCompletions.add(() -> wait
+                    .completeExceptionally(new IllegalStateException("Session closed before response completed"))));
+            plainWaits.forEach((result, terminal) -> {
+                if (terminal.isDone()) {
+                    // Preserve a received terminal outcome even if its scheduler handoff is queued.
+                    waitCompletions.add(() -> terminal.whenComplete((value, error) -> {
+                        if (error != null) {
+                            result.completeExceptionally(error);
+                        } else {
+                            result.complete(value);
+                        }
+                    }));
+                } else {
+                    waitCompletions.add(() -> result.completeExceptionally(
+                            new IllegalStateException("Session closed before response completed")));
+                }
+            });
+            structuredWaits.clear();
+            if (force) {
+                retireCallbacks();
+            }
+            plainWaits.clear();
+        }
+
+        cancelPendingExternalTools();
+        clearSkillProvider();
+        timeoutScheduler.shutdownNow();
+        releaseGitHubTokenProviderRegistration();
+        if (!waitCompletions.isEmpty()) {
+            // Completion can run blocking user continuations; don't borrow a shared or user
+            // executor.
+            var completions = Executors.newCachedThreadPool(task -> {
+                var thread = new Thread(task, "copilot-session-retirement");
+                thread.setDaemon(true);
+                return thread;
+            });
+            try {
+                waitCompletions.forEach(completions::execute);
+            } finally {
+                completions.shutdown();
+            }
+        }
+        return true;
+    }
+
+    private synchronized void retireCallbacks() {
+        callbacksRetired = true;
+        eventHandlers.forEach(subscription -> subscription.handler.set(null));
+        eventHandlers.clear();
+        toolHandlers.set(Map.of());
+        commandHandlers.clear();
+        bearerTokenProviders.clear();
+        permissionHandler.set(null);
+        mcpAuthHandler.set(null);
+        userInputHandler.set(null);
+        elicitationHandler.set(null);
+        exitPlanModeHandler.set(null);
+        autoModeSwitchHandler.set(null);
+        hooksHandler.set(null);
+        skillProvider.set(null);
+        eventErrorHandler = null;
+        transformCallbacks = null;
+    }
+
+    // ===== Internal response types for agent API =====
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    record SessionDetachResponse(@JsonProperty("success") boolean success, @JsonProperty("error") String error) {
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    private record AgentListResponse(@JsonProperty("agents") List<AgentInfo> agents) {
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    private record AgentGetCurrentResponse(@JsonProperty("agent") AgentInfo agent) {
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    private record AgentSelectResponse(@JsonProperty("agent") AgentInfo agent) {
+    }
+
+}

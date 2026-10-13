@@ -1,17 +1,17 @@
-# Session Lifecycle Hooks
+# Session lifecycle hooks
 
 Session lifecycle hooks let you respond to session start and end events. Use them to:
 
-- Initialize context when sessions begin
-- Clean up resources when sessions end
-- Track session metrics and analytics
-- Configure session behavior dynamically
+* Initialize context when sessions begin
+* Clean up resources when sessions end
+* Track session metrics and analytics
+* Configure session behavior dynamically
 
-## Session Start Hook {#session-start}
+## Session start hook
 
 The `onSessionStart` hook is called when a session begins (new or resumed).
 
-### Hook Signature
+### Hook signature
 
 <details open>
 <summary><strong>Node.js / TypeScript</strong></summary>
@@ -39,18 +39,18 @@ type SessionStartHandler = (
 
 <!-- docs-validate: hidden -->
 ```python
-from copilot.types import SessionStartHookInput, HookInvocation, SessionStartHookOutput
+from copilot.session import SessionStartHookInput, SessionStartHookOutput
 from typing import Callable, Awaitable
 
 SessionStartHandler = Callable[
-    [SessionStartHookInput, HookInvocation],
+    [SessionStartHookInput, dict[str, str]],
     Awaitable[SessionStartHookOutput | None]
 ]
 ```
 <!-- /docs-validate: hidden -->
 ```python
 SessionStartHandler = Callable[
-    [SessionStartHookInput, HookInvocation],
+    [SessionStartHookInput, dict[str, str]],
     Awaitable[SessionStartHookOutput | None]
 ]
 ```
@@ -88,7 +88,7 @@ type SessionStartHandler func(
 
 <!-- docs-validate: hidden -->
 ```csharp
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
 
 public delegate Task<SessionStartHookOutput?> SessionStartHandler(
     SessionStartHookInput input,
@@ -99,6 +99,32 @@ public delegate Task<SessionStartHookOutput?> SessionStartHandler(
 public delegate Task<SessionStartHookOutput?> SessionStartHandler(
     SessionStartHookInput input,
     HookInvocation invocation);
+```
+
+</details>
+
+<details>
+<summary><strong>Java</strong></summary>
+
+<!-- docs-validate: hidden -->
+```java
+import com.github.copilot.rpc.*;
+import java.util.concurrent.CompletableFuture;
+
+public class SessionStartSignature {
+    SessionStartHandler handler = (SessionStartHookInput input, HookInvocation invocation) ->
+        CompletableFuture.completedFuture(null);
+    public static void main(String[] args) {}
+}
+```
+<!-- /docs-validate: hidden -->
+```java
+@FunctionalInterface
+public interface SessionStartHandler {
+    CompletableFuture<SessionStartHookOutput> handle(
+        SessionStartHookInput input,
+        HookInvocation invocation);
+}
 ```
 
 </details>
@@ -121,7 +147,7 @@ public delegate Task<SessionStartHookOutput?> SessionStartHandler(
 
 ### Examples
 
-#### Add Project Context at Start
+#### Add project context at start
 
 <details open>
 <summary><strong>Node.js / TypeScript</strong></summary>
@@ -152,6 +178,8 @@ Package manager: ${projectInfo.packageManager}
 <summary><strong>Python</strong></summary>
 
 ```python
+from copilot.session import PermissionHandler
+
 async def on_session_start(input_data, invocation):
     print(f"Session {invocation['session_id']} started ({input_data['source']})")
     
@@ -165,14 +193,12 @@ Package manager: {project_info['packageManager']}
         """.strip()
     }
 
-session = await client.create_session({
-    "hooks": {"on_session_start": on_session_start}
-})
+session = await client.create_session(on_permission_request=PermissionHandler.approve_all, hooks={"on_session_start": on_session_start})
 ```
 
 </details>
 
-#### Handle Session Resume
+#### Handle session resume
 
 ```typescript
 const session = await client.createSession({
@@ -196,7 +222,7 @@ Session resumed. Previous context:
 });
 ```
 
-#### Load User Preferences
+#### Load user preferences
 
 ```typescript
 const session = await client.createSession({
@@ -224,13 +250,11 @@ const session = await client.createSession({
 });
 ```
 
----
-
-## Session End Hook {#session-end}
+## Session end hook
 
 The `onSessionEnd` hook is called when a session ends.
 
-### Hook Signature
+### Hook signature
 
 <details open>
 <summary><strong>Node.js / TypeScript</strong></summary>
@@ -249,18 +273,18 @@ type SessionEndHandler = (
 
 <!-- docs-validate: hidden -->
 ```python
-from copilot.types import SessionEndHookInput, HookInvocation
+from copilot.session import SessionEndHookInput
 from typing import Callable, Awaitable
 
 SessionEndHandler = Callable[
-    [SessionEndHookInput, HookInvocation],
+    [SessionEndHookInput, dict[str, str]],
     Awaitable[None]
 ]
 ```
 <!-- /docs-validate: hidden -->
 ```python
 SessionEndHandler = Callable[
-    [SessionEndHookInput, HookInvocation],
+    [SessionEndHookInput, dict[str, str]],
     Awaitable[SessionEndHookOutput | None]
 ]
 ```
@@ -304,6 +328,32 @@ public delegate Task<SessionEndHookOutput?> SessionEndHandler(
 
 </details>
 
+<details>
+<summary><strong>Java</strong></summary>
+
+<!-- docs-validate: hidden -->
+```java
+import com.github.copilot.rpc.*;
+import java.util.concurrent.CompletableFuture;
+
+public class SessionEndSignature {
+    SessionEndHandler handler = (SessionEndHookInput input, HookInvocation invocation) ->
+        CompletableFuture.completedFuture(null);
+    public static void main(String[] args) {}
+}
+```
+<!-- /docs-validate: hidden -->
+```java
+@FunctionalInterface
+public interface SessionEndHandler {
+    CompletableFuture<SessionEndHookOutput> handle(
+        SessionEndHookInput input,
+        HookInvocation invocation);
+}
+```
+
+</details>
+
 ### Input
 
 | Field | Type | Description |
@@ -314,7 +364,7 @@ public delegate Task<SessionEndHookOutput?> SessionEndHandler(
 | `finalMessage` | string \| undefined | The last message from the session |
 | `error` | string \| undefined | Error message if session ended due to error |
 
-#### End Reasons
+#### End reasons
 
 | Reason | Description |
 |--------|-------------|
@@ -334,7 +384,7 @@ public delegate Task<SessionEndHookOutput?> SessionEndHandler(
 
 ### Examples
 
-#### Track Session Metrics
+#### Track session metrics
 
 <details open>
 <summary><strong>Node.js / TypeScript</strong></summary>
@@ -371,6 +421,8 @@ const session = await client.createSession({
 <summary><strong>Python</strong></summary>
 
 ```python
+from copilot.session import PermissionHandler
+
 session_start_times = {}
 
 async def on_session_start(input_data, invocation):
@@ -390,17 +442,15 @@ async def on_session_end(input_data, invocation):
     session_start_times.pop(invocation["session_id"], None)
     return None
 
-session = await client.create_session({
-    "hooks": {
+session = await client.create_session(on_permission_request=PermissionHandler.approve_all, hooks={
         "on_session_start": on_session_start,
         "on_session_end": on_session_end,
-    }
-})
+    })
 ```
 
 </details>
 
-#### Clean Up Resources
+#### Clean up resources
 
 ```typescript
 const sessionResources = new Map<string, { tempFiles: string[] }>();
@@ -429,7 +479,7 @@ const session = await client.createSession({
 });
 ```
 
-#### Save Session State for Resume
+#### Save session state for resume
 
 ```typescript
 const session = await client.createSession({
@@ -449,7 +499,7 @@ const session = await client.createSession({
 });
 ```
 
-#### Log Session Summary
+#### Log session summary
 
 ```typescript
 const sessionData: Record<string, { prompts: number; tools: number; startTime: number }> = {};
@@ -490,20 +540,56 @@ Session Summary:
 });
 ```
 
-## Best Practices
+## Agent stop hook
+
+The agent stop hook runs when the top-level agent naturally reaches the end of a turn. It is separate from `onSessionEnd`: the session remains active, and the hook can request another agent turn.
+
+| Language | Handler |
+|----------|---------|
+| Node.js / TypeScript | `onAgentStop` |
+| Python | `on_agent_stop` |
+| Go | `OnAgentStop` |
+| .NET | `OnAgentStop` |
+| Rust | `on_agent_stop` |
+| Java | `setOnAgentStop` |
+
+### Input
+
+The public member names follow each language's casing conventions:
+
+| Meaning | Node.js / Python | Go / .NET | Rust | Java |
+|---------|------------------|-----------|------|------|
+| Why the agent stopped, such as `end_turn` | `stopReason` | `StopReason` | `stop_reason` | `getStopReason()` |
+| Path to the on-disk session transcript | `transcriptPath` | `TranscriptPath` | `transcript_path` | `getTranscriptPath()` |
+| Whether an earlier block decision already forced this continuation | `stopHookActive` | `StopHookActive` | `stop_hook_active` | `getStopHookActive()` |
+
+### Output
+
+Return no output to let the agent stop. Return a block decision to enqueue another user message and continue:
+
+```json
+{
+  "decision": "block",
+  "reason": "Run the final validation and fix any failures."
+}
+```
+
+Use the active-stop member listed above to avoid repeatedly blocking an agent that has already continued because of this hook. The runtime also caps consecutive block decisions.
+
+## Best practices
 
 1. **Keep `onSessionStart` fast** - Users are waiting for the session to be ready.
 
-2. **Handle all end reasons** - Don't assume sessions end cleanly; handle errors and aborts.
+1. **Handle all end reasons** - Don't assume sessions end cleanly; handle errors and aborts.
 
-3. **Clean up resources** - Use `onSessionEnd` to free any resources allocated during the session.
+1. **Clean up resources** - Use `onSessionEnd` to free any resources allocated during the session.
 
-4. **Store minimal state** - If tracking session data, keep it lightweight.
+1. **Store minimal state** - If tracking session data, keep it lightweight.
 
-5. **Make cleanup idempotent** - `onSessionEnd` might not be called if the process crashes.
+1. **Make cleanup idempotent** - `onSessionEnd` might not be called if the process crashes.
 
-## See Also
+## See also
 
-- [Hooks Overview](./index.md)
-- [Error Handling Hook](./error-handling.md)
-- [Debugging Guide](../troubleshooting/debugging.md)
+* [Hooks Overview](./README.md)
+* [Error Handling Hook](./error-handling.md)
+* [Debugging Guide](../troubleshooting/debugging.md)

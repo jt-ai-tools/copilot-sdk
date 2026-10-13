@@ -49,6 +49,7 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
+.pytest-diagnostics/
 cover/
 
 # Translations
@@ -163,12 +164,6 @@ cython_debug/
 .ruff_cache/
 .ty_cache/
 
-# uv
-uv.lock
-
 # Build script caches
 .cli-cache/
 .build-temp/
-
-# Bundled CLI binary (only in platform wheels, not in repo)
-copilot/bin/

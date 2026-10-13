@@ -1,0 +1,19 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug Node.js SDK (chat sample)",
+      "type": "node",
+      "request": "launch",
+      "runtimeArgs": ["--enable-source-maps", "--import", "tsx"],
+      "program": "samples/chat.ts",
+      "cwd": "${workspaceFolder}/nodejs",
+      "console": "integratedTerminal",
+      "autoAttachChildProcesses": true,
+      "sourceMaps": true,
+      "resolveSourceMapLocations": [
+        "${workspaceFolder}/**"
+      ]
+    }
+  ]
+}

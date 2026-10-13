@@ -1,0 +1,81 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *--------------------------------------------------------------------------------------------*/
+
+// AUTO-GENERATED FILE - DO NOT EDIT
+// Generated from: session-events.schema.json
+
+package com.github.copilot.generated;
+
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.github.copilot.CopilotExperimental;
+import java.util.List;
+import java.util.Map;
+import javax.annotation.processing.Generated;
+
+/**
+ * Session event "session.shutdown". Session termination metrics including usage statistics, code changes, and shutdown reason
+ * @since 1.0.0
+ */
+@JsonIgnoreProperties(ignoreUnknown = true)
+@JsonInclude(JsonInclude.Include.NON_NULL)
+@javax.annotation.processing.Generated("copilot-sdk-codegen")
+public final class SessionShutdownEvent extends SessionEvent {
+
+    @Override
+    public String getType() { return "session.shutdown"; }
+
+    @JsonProperty("data")
+    private SessionShutdownEventData data;
+
+    public SessionShutdownEventData getData() { return data; }
+    public void setData(SessionShutdownEventData data) { this.data = data; }
+
+    /** Data payload for {@link SessionShutdownEvent}. */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record SessionShutdownEventData(
+        /** Complete accounting state captured atomically with receipt watermarks. */
+        @JsonProperty("accountingSnapshot") UsageGetMetricsResult accountingSnapshot,
+        /** Provider/model accounting preserved for replay without consulting current provider selection. */
+        @JsonProperty("providerModelMetrics") List<UsageMetricsProviderModelMetric> providerModelMetrics,
+        /** Per-source accounting sequence watermarks subsuming preceding usage receipts. */
+        @JsonProperty("usageAccountingWatermarks") Map<String, Long> usageAccountingWatermarks,
+        /** Whether the session ended normally ("routine") or due to a crash/fatal error ("error") */
+        @JsonProperty("shutdownType") ShutdownType shutdownType,
+        /** Error description when shutdownType is "error" */
+        @JsonProperty("errorReason") String errorReason,
+        /** Total number of premium API requests used during the session */
+        @JsonProperty("totalPremiumRequests") Double totalPremiumRequests,
+        /** Session-wide accumulated nano-AI units cost */
+        @CopilotExperimental
+        @JsonProperty("totalNanoAiu") Double totalNanoAiu,
+        /** Session-wide per-token-type accumulated token counts */
+        @JsonProperty("tokenDetails") Map<String, ShutdownTokenDetail> tokenDetails,
+        /** Cumulative time spent in API calls during the session, in milliseconds */
+        @JsonProperty("totalApiDurationMs") Long totalApiDurationMs,
+        /** Unix timestamp (milliseconds) when the session started */
+        @JsonProperty("sessionStartTime") Long sessionStartTime,
+        /** On-disk byte size of the session's persisted events.jsonl file at shutdown time; omitted when the file does not exist or cannot be stat'd */
+        @JsonProperty("eventsFileSizeBytes") Long eventsFileSizeBytes,
+        /** Aggregate code change metrics for the session */
+        @JsonProperty("codeChanges") ShutdownCodeChanges codeChanges,
+        /** Per-model usage breakdown, keyed by model identifier */
+        @JsonProperty("modelMetrics") Map<String, ShutdownModelMetric> modelMetrics,
+        /** Per-agent usage breakdown, keyed by agent instance identifier. The main conversation uses the stable key `main`. */
+        @JsonProperty("agentMetrics") Map<String, ShutdownAgentMetric> agentMetrics,
+        /** Model that was selected at the time of shutdown */
+        @JsonProperty("currentModel") String currentModel,
+        /** Total tokens in context window at shutdown */
+        @JsonProperty("currentTokens") Long currentTokens,
+        /** System message token count at shutdown */
+        @JsonProperty("systemTokens") Long systemTokens,
+        /** Non-system message token count at shutdown */
+        @JsonProperty("conversationTokens") Long conversationTokens,
+        /** Tool definitions token count at shutdown */
+        @JsonProperty("toolDefinitionsTokens") Long toolDefinitionsTokens
+    ) {
+    }
+}

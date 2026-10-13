@@ -13,9 +13,14 @@ if: "github.event_name == 'workflow_dispatch' || github.event.label.name == 'run
 permissions:
   contents: read
   issues: read
+  pull-requests: read
+  copilot-requests: write
 steps:
   - name: Clone copilot-agent-runtime
-    run: git clone --depth 1 https://x-access-token:${{ secrets.RUNTIME_TRIAGE_TOKEN }}@github.com/github/copilot-agent-runtime.git ${{ github.workspace }}/copilot-agent-runtime
+    env:
+      GH_AW_GITHUB_WORKSPACE: ${{ github.workspace }}
+      RUNTIME_TRIAGE_TOKEN: ${{ secrets.RUNTIME_TRIAGE_TOKEN }}
+    run: git clone --depth 1 https://x-access-token:${RUNTIME_TRIAGE_TOKEN}@github.com/github/copilot-agent-runtime.git ${GH_AW_GITHUB_WORKSPACE}/copilot-agent-runtime
 tools:
   github:
     toolsets: [default]
@@ -28,6 +33,7 @@ tools:
     - "tail:*"
     - "wc:*"
     - "ls:*"
+    - "jq:*"
 safe-outputs:
   github-token: ${{ secrets.RUNTIME_TRIAGE_TOKEN }}
   allowed-github-references: ["repo", "github/copilot-agent-runtime"]
@@ -78,6 +84,7 @@ If the issue does NOT appear to be caused by SDK code, or you suspect the runtim
 - Focus on the areas that correspond to the reported issue (e.g., if the issue is about streaming, look at the runtime's streaming implementation)
 
 Common areas where runtime fixes are needed:
+
 - JSON-RPC protocol handling and response formatting
 - Session lifecycle (creation, persistence, compaction, destruction)
 - Tool execution and permission handling

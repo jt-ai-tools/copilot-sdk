@@ -1,0 +1,328 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *--------------------------------------------------------------------------------------------*/
+
+using System.Diagnostics;
+using System.Net.Http;
+using System.Net.Http.Json;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
+
+namespace GitHub.Copilot.Test.Harness;
+
+public sealed partial class ReplayProxy : IAsyncDisposable
+{
+    private Process? _process;
+    private Task<string>? _startupTask;
+
+    public string? ConnectProxyUrl { get; private set; }
+    public string? CaFilePath { get; private set; }
+
+    public Task<string> StartAsync()
+    {
+        return _startupTask ??= StartCoreAsync();
+
+        async Task<string> StartCoreAsync()
+        {
+            // Spawn the server directly so a stalled npm/cmd wrapper cannot strand startup or cleanup.
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = "node",
+                WorkingDirectory = Path.Join(FindRepoRoot(), "test", "harness"),
+                Arguments = "startup.mjs",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+
+            var process = new Process { StartInfo = startInfo };
+            var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var diagnostics = new StartupDiagnostics();
+            var elapsed = Stopwatch.StartNew();
+
+            process.OutputDataReceived += (_, e) =>
+            {
+                if (e.Data == null) return;
+                diagnostics.AppendOutput(e.Data);
+                var match = Regex.Match(e.Data, @"Listening: (?<url>http://[^\s]+)\s+(?<metadata>\{.*\})$");
+                if (!match.Success)
+                {
+                    if (e.Data.Contains("Listening: ", StringComparison.Ordinal))
+                    {
+                        tcs.TrySetException(
+                            new InvalidOperationException(
+                                $"Proxy startup line missing CONNECT proxy metadata: {e.Data}"));
+                    }
+                    return;
+                }
+                try
+                {
+                    var metadata = JsonSerializer.Deserialize(
+                        match.Groups["metadata"].Value,
+                        ReplayProxyJsonContext.Default.ProxyStartupMetadata);
+                    ConnectProxyUrl = metadata?.ConnectProxyUrl;
+                    CaFilePath = metadata?.CaFilePath;
+                }
+                catch (Exception ex) when (ex is JsonException or NotSupportedException)
+                {
+                    tcs.TrySetException(
+                        new InvalidOperationException(
+                            $"Failed to parse proxy startup metadata: {match.Groups["metadata"].Value}",
+                            ex));
+                    return;
+                }
+                if (string.IsNullOrEmpty(ConnectProxyUrl) || string.IsNullOrEmpty(CaFilePath))
+                {
+                    tcs.TrySetException(
+                        new InvalidOperationException(
+                            $"Proxy startup metadata missing CONNECT proxy details: {e.Data}"));
+                    return;
+                }
+                tcs.TrySetResult(match.Groups["url"].Value);
+            };
+
+            process.ErrorDataReceived += (_, e) =>
+            {
+                if (e.Data == null) return;
+                diagnostics.AppendError(e.Data);
+                if (!e.Data.StartsWith("[SDK proxy startup]", StringComparison.Ordinal))
+                {
+                    Console.Error.WriteLine(e.Data);
+                }
+            };
+
+            try
+            {
+                process.Start();
+            }
+            catch
+            {
+                process.Dispose();
+                throw;
+            }
+            _process = process;
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+            _ = process.WaitForExitAsync().ContinueWith(_ =>
+            {
+                if (!tcs.Task.IsCompleted)
+                {
+                    tcs.TrySetException(new Exception(
+                        $"Proxy exited before readiness. {diagnostics.Describe(process.Id, elapsed.Elapsed, process.ExitCode)}"));
+                }
+            });
+
+            // Use longer timeout on Windows due to slower process startup
+            var timeoutSeconds = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? 30 : 10;
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+            using var registration = cts.Token.Register(() => tcs.TrySetException(new TimeoutException(
+                $"Timeout waiting for proxy. {diagnostics.Describe(process.Id, elapsed.Elapsed, process.HasExited ? process.ExitCode : null)}")));
+
+            return await tcs.Task;
+        }
+    }
+
+    internal sealed class StartupDiagnostics
+    {
+        private const int OutputLimit = 4096;
+        private readonly object _gate = new();
+        private readonly StringBuilder _stdout = new();
+        private readonly StringBuilder _stderr = new();
+
+        public void AppendOutput(string line) => Append(_stdout, line);
+
+        public void AppendError(string line) => Append(_stderr, line);
+
+        private void Append(StringBuilder output, string line)
+        {
+            lock (_gate)
+            {
+                output.Append(line, Math.Max(0, line.Length - OutputLimit), Math.Min(line.Length, OutputLimit));
+                output.AppendLine();
+                if (output.Length > OutputLimit)
+                {
+                    output.Remove(0, output.Length - OutputLimit);
+                }
+            }
+        }
+
+        public string Describe(int processId, TimeSpan elapsed, int? exitCode)
+        {
+            lock (_gate)
+            {
+                var state = exitCode is int code ? $"exited with code {code}" : "running";
+                return $"PID {processId}, {state}, elapsed {elapsed.TotalSeconds:F1}s." +
+                    $"\n--- stdout tail ---\n{_stdout}\n--- stderr tail ---\n{_stderr}";
+            }
+        }
+    }
+
+    public async Task StopAsync(bool skipWritingCache = false)
+    {
+        if (_startupTask != null)
+        {
+            try
+            {
+                var url = await _startupTask;
+                var stopUrl = skipWritingCache ? $"{url}/stop?skipWritingCache=true" : $"{url}/stop";
+                using var client = new HttpClient();
+                await client.PostAsync(stopUrl, null);
+            }
+            catch { /* Best effort */ }
+        }
+
+        try
+        {
+            if (_process is { HasExited: false })
+            {
+                try { _process.Kill(entireProcessTree: true); await _process.WaitForExitAsync(); }
+                catch { /* Ignore */ }
+            }
+        }
+        catch (InvalidOperationException)
+        {
+            // Process.Start failed before this object was associated with a child.
+        }
+
+        _process?.Dispose();
+        _process = null;
+        _startupTask = null;
+    }
+
+    public async Task ConfigureAsync(string filePath, string workDir, string backend, bool replayOnly = false)
+    {
+        var url = await (_startupTask ?? throw new InvalidOperationException("Proxy not started"));
+
+        using var client = new HttpClient();
+        var response = await client.PostAsJsonAsync(
+            $"{url}/config",
+            new ConfigureRequest(filePath, workDir, backend, replayOnly),
+            ReplayProxyJsonContext.Default.ConfigureRequest);
+        response.EnsureSuccessStatusCode();
+    }
+
+    private record ConfigureRequest(string FilePath, string WorkDir, string Backend, bool ReplayOnly);
+
+    private record ProxyStartupMetadata(string? ConnectProxyUrl, string? CaFilePath);
+
+    public async Task<List<ParsedHttpExchange>> GetExchangesAsync()
+    {
+        var url = await (_startupTask ?? throw new InvalidOperationException("Proxy not started"));
+
+        using var client = new HttpClient();
+        return await client.GetFromJsonAsync($"{url}/exchanges", ReplayProxyJsonContext.Default.ListParsedHttpExchange)
+               ?? [];
+    }
+
+    public async Task SetCopilotUserByTokenAsync(string token, CopilotUserConfig response)
+    {
+        var url = await (_startupTask ?? throw new InvalidOperationException("Proxy not started"));
+
+        using var client = new HttpClient();
+        var payload = new CopilotUserByTokenRequest(token, response);
+        var resp = await client.PostAsJsonAsync($"{url}/copilot-user-config", payload, ReplayProxyJsonContext.Default.CopilotUserByTokenRequest);
+        resp.EnsureSuccessStatusCode();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await StopAsync();
+    }
+
+    private static string FindRepoRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir != null)
+        {
+            if (File.Exists(Path.Combine(dir.FullName, "test", "harness", "package.json")))
+                return dir.FullName;
+            dir = dir.Parent;
+        }
+        throw new InvalidOperationException("Could not find repository root");
+    }
+
+    [JsonSourceGenerationOptions(JsonSerializerDefaults.Web)]
+    [JsonSerializable(typeof(ConfigureRequest))]
+    [JsonSerializable(typeof(List<ParsedHttpExchange>))]
+    [JsonSerializable(typeof(CopilotUserByTokenRequest))]
+    [JsonSerializable(typeof(Dictionary<string, CopilotUserQuotaSnapshot>))]
+    [JsonSerializable(typeof(ProxyStartupMetadata))]
+    private partial class ReplayProxyJsonContext : JsonSerializerContext;
+}
+
+public record CopilotUserByTokenRequest(string Token, CopilotUserConfig Response);
+
+public record CopilotUserConfig(
+    string Login,
+    [property: JsonPropertyName("copilot_plan")]
+    string CopilotPlan,
+    CopilotUserEndpoints Endpoints,
+    [property: JsonPropertyName("analytics_tracking_id")]
+    string AnalyticsTrackingId,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    [property: JsonPropertyName("quota_snapshots")]
+    IReadOnlyDictionary<string, CopilotUserQuotaSnapshot>? QuotaSnapshots = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    long? Id = null);
+
+public record CopilotUserEndpoints(string Api, string Telemetry);
+
+public record CopilotUserQuotaSnapshot(
+    [property: JsonPropertyName("entitlement")]
+    int Entitlement,
+    [property: JsonPropertyName("overage_count")]
+    int OverageCount,
+    [property: JsonPropertyName("overage_permitted")]
+    bool OveragePermitted,
+    [property: JsonPropertyName("percent_remaining")]
+    double PercentRemaining,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    [property: JsonPropertyName("timestamp_utc")]
+    string? TimestampUtc = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    [property: JsonPropertyName("unlimited")]
+    bool? Unlimited = null);
+
+public record ParsedHttpExchange(
+    ChatCompletionRequest Request,
+    ChatCompletionResponse? Response,
+    Dictionary<string, JsonElement>? RequestHeaders,
+    CompactionProviderUsage? CompactionUsage = null);
+
+public record CompactionProviderUsage(string InteractionId, string Summary, int ResponseCount, long? InputTokens);
+
+public record ChatCompletionRequest(
+    string Model,
+    List<ChatCompletionMessage> Messages,
+    List<ChatCompletionTool>? Tools,
+    [property: JsonPropertyName("tool_choice")] JsonElement? ToolChoice = null,
+    [property: JsonPropertyName("response_format")] JsonElement? ResponseFormat = null);
+
+public record ChatCompletionMessage(
+    string Role,
+    JsonElement? Content,
+    [property: JsonPropertyName("tool_call_id")] string? ToolCallId,
+    [property: JsonPropertyName("tool_calls")] List<ChatCompletionToolCall>? ToolCalls)
+{
+    /// <summary>
+    /// Returns Content as a string when the JSON value is a string, or null otherwise.
+    /// </summary>
+    [JsonIgnore]
+    public string? StringContent => Content is { ValueKind: JsonValueKind.String } c ? c.GetString() : null;
+}
+
+public record ChatCompletionToolCall(string Id, string Type, ChatCompletionToolCallFunction Function);
+
+public record ChatCompletionToolCallFunction(string Name, string? Arguments);
+
+public record ChatCompletionTool(string Type, ChatCompletionToolFunction Function);
+
+public record ChatCompletionToolFunction(string Name, string? Description, JsonElement? Parameters);
+
+public record ChatCompletionResponse(string Id, string Model, List<ChatCompletionChoice> Choices);
+
+public record ChatCompletionChoice(int Index, ChatCompletionMessage Message, [property: JsonPropertyName("finish_reason")] string FinishReason);

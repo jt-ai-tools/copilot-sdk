@@ -18,6 +18,7 @@ For user-scoped extensions (persist across all repos), add `location: "user"`.
 ### Step 2: Edit the extension file
 
 Modify the generated `extension.mjs` using `edit` or `create` tools. The file must:
+
 - Be named `extension.mjs` (only `.mjs` is supported)
 - Use ES module syntax (`import`/`export`)
 - Call `joinSession({ ... })`
@@ -48,6 +49,7 @@ Check that the extension loaded successfully and isn't marked as "failed".
 ```
 
 Discovery rules:
+
 - The CLI scans `.github/extensions/` relative to the git root
 - It also scans the user's copilot config extensions directory
 - Only immediate subdirectories are checked (not recursive)
@@ -59,13 +61,11 @@ Discovery rules:
 ## Minimal Skeleton
 
 ```js
-import { approveAll } from "@github/copilot-sdk";
 import { joinSession } from "@github/copilot-sdk/extension";
 
 await joinSession({
-    onPermissionRequest: approveAll, // Required — handle permission requests
-    tools: [],                     // Optional — custom tools
-    hooks: {},                     // Optional — lifecycle hooks
+    tools: [], // Optional — custom tools
+    hooks: {}, // Optional — lifecycle hooks
 });
 ```
 
@@ -76,9 +76,10 @@ await joinSession({
 ```js
 tools: [
     {
-        name: "tool_name",           // Required. Must be globally unique across all extensions.
+        name: "tool_name", // Required. Must be globally unique across all extensions.
         description: "What it does", // Required. Shown to the agent in tool descriptions.
-        parameters: {                // Optional. JSON Schema for the arguments.
+        parameters: {
+            // Optional. JSON Schema for the arguments.
             type: "object",
             properties: {
                 arg1: { type: "string", description: "..." },
@@ -98,10 +99,11 @@ tools: [
             return `Result: ${args.arg1}`;
         },
     },
-]
+];
 ```
 
 **Constraints:**
+
 - Tool names must be unique across ALL loaded extensions. Collisions cause the second extension to fail to load.
 - Handler must return a string or `{ textResultForLlm: string, resultType?: string }`.
 - Handler receives `(args, invocation)` — the second argument has `sessionId`, `toolCallId`, `toolName`.
@@ -116,19 +118,22 @@ hooks: {
     onUserPromptSubmitted: async (input, invocation) => { ... },
     onPreToolUse: async (input, invocation) => { ... },
     onPostToolUse: async (input, invocation) => { ... },
+    onPostToolUseFailure: async (input, invocation) => { ... },
     onSessionStart: async (input, invocation) => { ... },
     onSessionEnd: async (input, invocation) => { ... },
     onErrorOccurred: async (input, invocation) => { ... },
+    onSubagentStart: async (input, invocation) => { ... },
+    onSubagentStop: async (input, invocation) => { ... },
 }
 ```
 
-All hook inputs include `timestamp` (unix ms) and `cwd` (working directory).
+All hook inputs include `sessionId`, `timestamp` (`Date`) and `workingDirectory`.
 All handlers receive `invocation: { sessionId: string }` as the second argument.
 All handlers may return `void`/`undefined` (no-op) or an output object.
 
 ### onUserPromptSubmitted
 
-**Input:** `{ prompt: string, timestamp, cwd }`
+**Input:** `{ prompt: string, timestamp, workingDirectory }`
 
 **Output (all fields optional):**
 | Field | Type | Effect |
@@ -138,7 +143,7 @@ All handlers may return `void`/`undefined` (no-op) or an output object.
 
 ### onPreToolUse
 
-**Input:** `{ toolName: string, toolArgs: unknown, timestamp, cwd }`
+**Input:** `{ toolName: string, toolArgs: unknown, timestamp, workingDirectory }`
 
 **Output (all fields optional):**
 | Field | Type | Effect |
@@ -150,7 +155,10 @@ All handlers may return `void`/`undefined` (no-op) or an output object.
 
 ### onPostToolUse
 
-**Input:** `{ toolName: string, toolArgs: unknown, toolResult: ToolResultObject, timestamp, cwd }`
+**Input:** `{ toolName: string, toolArgs: unknown, toolResult: ToolResultObject, timestamp, workingDirectory }`
+
+Fires only when the tool returned a successful result. To observe non-success
+outcomes, register `onPostToolUseFailure` as well.
 
 **Output (all fields optional):**
 | Field | Type | Effect |
@@ -158,9 +166,29 @@ All handlers may return `void`/`undefined` (no-op) or an output object.
 | `modifiedResult` | `ToolResultObject` | Replaces the tool result |
 | `additionalContext` | `string` | Injected into the conversation |
 
+### onPostToolUseFailure
+
+**Input:** `{ toolName: string, toolArgs: unknown, error: string, timestamp, workingDirectory }`
+
+Fires after a tool execution whose result was `"failure"`. `onPostToolUse`
+does **not** fire for these outcomes, so register this handler to observe or
+react to them — useful for telemetry, replay buffers, fault-injection tests,
+or pairing pre/post tool tracking that would otherwise leak when the tool
+fails. Note the input shape differs from `onPostToolUse`: only `error` (the
+stringified failure message) is provided, not the full `toolResult`.
+
+**Output (all fields optional):**
+| Field | Type | Effect |
+|-------|------|--------|
+| `additionalContext` | `string` | Appended as hidden guidance the model sees alongside the failed tool result |
+
+Note: only `"failure"` results trigger this hook. Other non-success
+`resultType` values (`"rejected"`, `"denied"`, `"timeout"`) do not currently
+fire it.
+
 ### onSessionStart
 
-**Input:** `{ source: "startup" \| "resume" \| "new", initialPrompt?: string, timestamp, cwd }`
+**Input:** `{ source: "startup" \| "resume" \| "new", initialPrompt?: string, timestamp, workingDirectory }`
 
 **Output (all fields optional):**
 | Field | Type | Effect |
@@ -169,7 +197,7 @@ All handlers may return `void`/`undefined` (no-op) or an output object.
 
 ### onSessionEnd
 
-**Input:** `{ reason: "complete" \| "error" \| "abort" \| "timeout" \| "user_exit", finalMessage?: string, error?: string, timestamp, cwd }`
+**Input:** `{ reason: "complete" \| "error" \| "abort" \| "timeout" \| "user_exit", finalMessage?: string, error?: string, timestamp, workingDirectory }`
 
 **Output (all fields optional):**
 | Field | Type | Effect |
@@ -179,7 +207,7 @@ All handlers may return `void`/`undefined` (no-op) or an output object.
 
 ### onErrorOccurred
 
-**Input:** `{ error: string, errorContext: "model_call" \| "tool_execution" \| "system" \| "user_input", recoverable: boolean, timestamp, cwd }`
+**Input:** `{ error: string, errorContext: "model_call" \| "tool_execution" \| "system" \| "user_input", recoverable: boolean, timestamp, workingDirectory }`
 
 **Output (all fields optional):**
 | Field | Type | Effect |
@@ -188,7 +216,32 @@ All handlers may return `void`/`undefined` (no-op) or an output object.
 | `retryCount` | `number` | Max retries (when errorHandling is "retry") |
 | `userNotification` | `string` | Message shown to the user |
 
----
+### onSubagentStart
+
+Fires before a sub-agent's first turn. The input's `sessionId` and the
+invocation's `sessionId` identify the parent session, not the child.
+
+**Input:** `{ sessionId: string, transcriptPath: string, agentName: string, agentDisplayName?: string, agentDescription?: string, timestamp, workingDirectory }`
+
+**Output (optional):**
+| Field | Type | Effect |
+|-------|------|--------|
+| `additionalContext` | `string` | Prepended to the child's initial prompt |
+
+### onSubagentStop
+
+Fires after a sub-agent completes a turn. The input includes the child's last
+assistant `response` and the parent's session metadata. `agentId` is available
+when the task registry supplies one. This is distinct from `onAgentStop`, which
+only runs for the top-level agent.
+
+**Input:** `{ sessionId: string, transcriptPath: string, agentName: string, agentDisplayName?: string, agentDescription?: string, agentId?: string, agentType: string, stopReason: "end_turn", response: string, timestamp, workingDirectory }`
+
+**Output (choose one, or return nothing):**
+| Field | Type | Effect |
+|-------|------|--------|
+| `decision` and `reason` | `"block"` and `string` | Continue the child for another turn using `reason` |
+| `modifiedResponse` | `string` | Replace the child's response reported to the parent |
 
 ## Session Object
 
@@ -197,6 +250,7 @@ After `joinSession()`, the returned `session` provides:
 ### session.send(options)
 
 Send a message programmatically:
+
 ```js
 await session.send({ prompt: "Analyze the test results." });
 await session.send({
@@ -208,6 +262,7 @@ await session.send({
 ### session.sendAndWait(options, timeout?)
 
 Send and block until the agent finishes (resolves on `session.idle`):
+
 ```js
 const response = await session.sendAndWait({ prompt: "What is 2+2?" });
 // response?.data.content contains the agent's reply
@@ -216,6 +271,7 @@ const response = await session.sendAndWait({ prompt: "What is 2+2?" });
 ### session.log(message, options?)
 
 Log to the CLI timeline:
+
 ```js
 await session.log("Extension ready");
 await session.log("Rate limit approaching", { level: "warning" });
@@ -226,24 +282,25 @@ await session.log("Processing...", { ephemeral: true }); // transient, not persi
 ### session.on(eventType, handler)
 
 Subscribe to session events. Returns an unsubscribe function.
+
 ```js
 const unsub = session.on("tool.execution_complete", (event) => {
-    // event.data.toolName, event.data.success, event.data.result
+    // event.data.success, event.data.result
 });
 ```
 
 ### Key Event Types
 
-| Event | Key Data Fields |
-|-------|----------------|
-| `assistant.message` | `content`, `messageId` |
-| `tool.execution_start` | `toolCallId`, `toolName`, `arguments` |
-| `tool.execution_complete` | `toolCallId`, `toolName`, `success`, `result`, `error` |
-| `user.message` | `content`, `attachments`, `source` |
-| `session.idle` | `backgroundTasks` |
-| `session.error` | `errorType`, `message`, `stack` |
-| `permission.requested` | `requestId`, `permissionRequest.kind` |
-| `session.shutdown` | `shutdownType`, `totalPremiumRequests` |
+| Event                     | Key Data Fields                                        |
+| ------------------------- | ------------------------------------------------------ |
+| `assistant.message`       | `content`, `messageId`                                 |
+| `tool.execution_start`    | `toolCallId`, `toolName`, `arguments`                  |
+| `tool.execution_complete` | `toolCallId`, `success`, `result`, `error`             |
+| `user.message`            | `content`, `attachments`, `source`                     |
+| `session.idle`            | `aborted`                                              |
+| `session.error`           | `errorType`, `message`, `stack`                        |
+| `permission.requested`    | `requestId`, `permissionRequest.kind`                  |
+| `session.shutdown`        | `shutdownType`, `totalPremiumRequests`                 |
 
 ### session.workspacePath
 

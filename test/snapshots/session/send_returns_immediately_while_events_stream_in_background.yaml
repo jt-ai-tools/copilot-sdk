@@ -1,5 +1,5 @@
 models:
-  - claude-sonnet-4.5
+  - claude-sonnet-5
 conversations:
   - messages:
       - role: system
@@ -41,11 +41,11 @@ conversations:
                 command","initial_wait":5,"mode":"sync"}'
       - role: tool
         tool_call_id: toolcall_0
-        content: Intent logged
+        content: Tool 'report_intent' does not exist.
       - role: tool
         tool_call_id: toolcall_1
         content: |-
           done
           <exited with exit code 0>
       - role: assistant
-        content: Command completed successfully. The output is "done".
+        content: Command completed successfully! The output was "done" after the 2 second sleep.

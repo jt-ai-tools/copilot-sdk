@@ -1,5 +1,5 @@
 models:
-  - claude-sonnet-4.5
+  - claude-sonnet-5
 conversations:
   - messages:
       - role: system
@@ -21,15 +21,6 @@ conversations:
           <skill-context name="test-skill">
 
           Base directory for this skill: ${workdir}/.test_skills/test-skill
-
-
-          ---
-
-          name: test-skill
-
-          description: A test skill that adds a marker to responses
-
-          ---
 
 
           # Test Skill Instructions

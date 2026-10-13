@@ -1,5 +1,5 @@
 models:
-  - claude-sonnet-4.5
+  - claude-sonnet-5
 conversations:
   - messages:
       - role: system
@@ -41,7 +41,9 @@ conversations:
               arguments: '{"path":"${workdir}/edit_me.txt","old_str":"Hello World","new_str":"Hi Universe"}'
       - role: tool
         tool_call_id: toolcall_0
-        content: Intent logged
+        content: Tool 'report_intent' does not exist. Available tools that can be called are ${shell}, ${read_shell},
+          ${stop_shell}, ${list_shell}, view, create, edit, web_fetch, skill, sql, read_agent, list_agents, grep, glob,
+          task.
       - role: tool
         tool_call_id: toolcall_1
         content: File ${workdir}/edit_me.txt updated with changes.
@@ -55,11 +57,12 @@ conversations:
       - role: tool
         tool_call_id: toolcall_2
         content: |-
-          1. Hi Universe
-          2. Goodbye World
-          3.
+          Hi Universe
+          Goodbye World
       - role: assistant
         content: |-
-          The file now contains:
-          1. Hi Universe
-          2. Goodbye World
+          Done! The file now contains:
+          ```
+          Hi Universe
+          Goodbye World
+          ```

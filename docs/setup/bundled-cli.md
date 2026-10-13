@@ -1,78 +1,56 @@
-# Bundled CLI Setup
+# Default setup (bundled CLI)
 
-Package the Copilot CLI alongside your application so users don't need to install or configure anything separately. Your app ships with everything it needs.
+The Node.js and .NET SDKs include the Copilot CLI as a dependency—your app ships with everything it needs, with no extra installation or configuration required.
 
-**Best for:** Desktop apps, standalone tools, Electron apps, distributable CLI utilities.
+The Python SDK recommends a one-time download step after installation:
 
-## How It Works
+```bash
+python -m copilot download-runtime
+```
 
-Instead of relying on a globally installed CLI, you include the CLI binary in your application bundle. The SDK points to your bundled copy via the `cliPath` option.
+This downloads the matching runtime and caches it locally. If you skip this step, the SDK will attempt to download it automatically on first use as a fallback.
+
+**Best for:** Most applications—desktop apps, standalone tools, CLI utilities, prototypes, and more.
+
+## How it works
+
+When you install the SDK, the Copilot runtime is included automatically (Node.js, .NET) or downloaded via `python -m copilot download-runtime` (Python). The SDK starts it as a child process and communicates over stdio. There's nothing extra to configure.
 
 ```mermaid
 flowchart TB
-    subgraph Bundle["Your Distributed App"]
+    subgraph Bundle["Your Application"]
         App["Application Code"]
         SDK["SDK Client"]
-        CLIBin["Copilot CLI Binary<br/>(bundled)"]
+        CLIBin["Copilot CLI Binary<br/>(included with SDK)"]
     end
 
     App --> SDK
-    SDK -- "cliPath" --> CLIBin
+    SDK --> CLIBin
     CLIBin -- "API calls" --> Copilot["☁️ GitHub Copilot"]
 
     style Bundle fill:#0d1117,stroke:#58a6ff,color:#c9d1d9
 ```
 
 **Key characteristics:**
-- CLI binary ships with your app — no separate install needed
-- You control the exact CLI version your app uses
-- Users authenticate through your app (or use env vars / BYOK)
-- Sessions are managed per-user on their machine
+* CLI binary is included with the SDK—no separate install needed
+* The SDK manages the CLI version to ensure compatibility
+* Users authenticate through your app (or use env vars / BYOK)
+* Sessions are managed per-user on their machine
 
-## Architecture: Bundled vs. Installed
+## Quick start
 
-```mermaid
-flowchart LR
-    subgraph Installed["Standard Setup"]
-        A1["Your App"] --> SDK1["SDK"]
-        SDK1 --> CLI1["Global CLI<br/>(/usr/local/bin/copilot)"]
-    end
-
-    subgraph Bundled["Bundled Setup"]
-        A2["Your App"] --> SDK2["SDK"]
-        SDK2 --> CLI2["Bundled CLI<br/>(./vendor/copilot)"]
-    end
-
-    style Installed fill:#161b22,stroke:#8b949e,color:#c9d1d9
-    style Bundled fill:#0d1117,stroke:#3fb950,color:#c9d1d9
-```
-
-## Setup
-
-### 1. Include the CLI in Your Project
-
-The CLI is distributed as part of the `@github/copilot` npm package. You can also obtain platform-specific binaries for your distribution pipeline.
-
-```bash
-# The CLI is available from the @github/copilot package
-npm install @github/copilot
-```
-
-### 2. Point the SDK to Your Bundled CLI
+> [!NOTE]
+> Each SDK has a minimum language runtime requirement—see the Prerequisites section of the [Node.js](../../nodejs/README.md#prerequisites), [Python](../../python/README.md#prerequisites), [Go](../../go/README.md#prerequisites), [Rust](../../rust/README.md#prerequisites), [Java](../../java/README.md#prerequisites), or [.NET](../../dotnet/README.md#prerequisites) README—since an unsupported runtime (e.g. Python below the stated floor) can cause `pip`/package managers to silently resolve an outdated SDK release instead of reporting a version conflict.
 
 <details open>
 <summary><strong>Node.js / TypeScript</strong></summary>
 
 ```typescript
 import { CopilotClient } from "@github/copilot-sdk";
-import path from "path";
 
-const client = new CopilotClient({
-    // Point to the CLI binary in your app bundle
-    cliPath: path.join(__dirname, "vendor", "copilot"),
-});
+const client = new CopilotClient();
 
-const session = await client.createSession({ model: "gpt-4.1" });
+const session = await client.createSession({ model: "gpt-5.4" });
 const response = await session.sendAndWait({ prompt: "Hello!" });
 console.log(response?.data.content);
 
@@ -86,15 +64,13 @@ await client.stop();
 
 ```python
 from copilot import CopilotClient
-from pathlib import Path
+from copilot.session import PermissionHandler
 
-client = CopilotClient({
-    "cli_path": str(Path(__file__).parent / "vendor" / "copilot"),
-})
+client = CopilotClient()
 await client.start()
 
-session = await client.create_session({"model": "gpt-4.1"})
-response = await session.send_and_wait({"prompt": "Hello!"})
+session = await client.create_session(on_permission_request=PermissionHandler.approve_all, model="gpt-5.4")
+response = await session.send_and_wait("Hello!")
 print(response.data.content)
 
 await client.stop()
@@ -104,6 +80,9 @@ await client.stop()
 
 <details>
 <summary><strong>Go</strong></summary>
+
+> [!NOTE]
+> Unlike Node.js, Python, and .NET, the Go SDK does not include a CLI as an automatic dependency. With no explicit path, `NewClient(nil)` uses an embedded CLI when available, then falls back to `copilot` on `PATH`. To embed a CLI, run the [bundler tool](../../go/README.md#distributing-your-application-with-an-embedded-github-copilot-cli) at build time. You can also set `COPILOT_CLI_PATH` or point a `Connection` at an existing binary. See [Local CLI Setup](./local-cli.md) for details.
 
 <!-- docs-validate: hidden -->
 ```go
@@ -119,33 +98,33 @@ import (
 func main() {
 	ctx := context.Background()
 
-	client := copilot.NewClient(&copilot.ClientOptions{
-		CLIPath: "./vendor/copilot",
-	})
+	client := copilot.NewClient(nil)
 	if err := client.Start(ctx); err != nil {
 		log.Fatal(err)
 	}
 	defer client.Stop()
 
-	session, _ := client.CreateSession(ctx, &copilot.SessionConfig{Model: "gpt-4.1"})
+	session, _ := client.CreateSession(ctx, &copilot.SessionConfig{Model: "gpt-5.4"})
 	response, _ := session.SendAndWait(ctx, copilot.MessageOptions{Prompt: "Hello!"})
-	fmt.Println(*response.Data.Content)
+	if d, ok := response.Data.(*copilot.AssistantMessageData); ok {
+		fmt.Println(d.Content)
+	}
 }
 ```
 <!-- /docs-validate: hidden -->
 
 ```go
-client := copilot.NewClient(&copilot.ClientOptions{
-    CLIPath:"./vendor/copilot",
-})
+client := copilot.NewClient(nil)
 if err := client.Start(ctx); err != nil {
     log.Fatal(err)
 }
 defer client.Stop()
 
-session, _ := client.CreateSession(ctx, &copilot.SessionConfig{Model: "gpt-4.1"})
+session, _ := client.CreateSession(ctx, &copilot.SessionConfig{Model: "gpt-5.4"})
 response, _ := session.SendAndWait(ctx, copilot.MessageOptions{Prompt: "Hello!"})
-fmt.Println(*response.Data.Content)
+if d, ok := response.Data.(*copilot.AssistantMessageData); ok {
+    fmt.Println(d.Content)
+}
 ```
 
 </details>
@@ -154,13 +133,9 @@ fmt.Println(*response.Data.Content)
 <summary><strong>.NET</strong></summary>
 
 ```csharp
-var client = new CopilotClient(new CopilotClientOptions
-{
-    CliPath = Path.Combine(AppContext.BaseDirectory, "vendor", "copilot"),
-});
-
+await using var client = new CopilotClient();
 await using var session = await client.CreateSessionAsync(
-    new SessionConfig { Model = "gpt-4.1" });
+    new SessionConfig { Model = "gpt-5.4" });
 
 var response = await session.SendAndWaitAsync(
     new MessageOptions { Prompt = "Hello!" });
@@ -169,9 +144,39 @@ Console.WriteLine(response?.Data.Content);
 
 </details>
 
-## Authentication Strategies
+<details>
+<summary><strong>Java</strong></summary>
 
-When bundling, you need to decide how your users will authenticate. Here are the common patterns:
+> [!NOTE]
+> The Java SDK does not bundle or embed the Copilot CLI. Install the CLI separately and either make `copilot` available on your `PATH` or set its location with `setCliPath(...)` (or connect to a running CLI server with `setCliUrl(...)`).
+
+```java
+import com.github.copilot.CopilotClient;
+import com.github.copilot.rpc.*;
+
+var client = new CopilotClient(new CopilotClientOptions()
+    // Point to the CLI binary installed on the system
+    .setCliPath("/path/to/vendor/copilot")
+);
+client.start().get();
+
+var session = client.createSession(new SessionConfig()
+    .setModel("gpt-5.4")
+    .setOnPermissionRequest(PermissionHandler.APPROVE_ALL)
+).get();
+
+var response = session.sendAndWait(new MessageOptions()
+    .setPrompt("Hello!")).get();
+System.out.println(response.getData().content());
+
+client.stop().get();
+```
+
+</details>
+
+## Authentication strategies
+
+You need to decide how your users will authenticate. Here are the common patterns:
 
 ```mermaid
 flowchart TB
@@ -188,41 +193,36 @@ flowchart TB
     style App fill:#0d1117,stroke:#58a6ff,color:#c9d1d9
 ```
 
-### Option A: User's Signed-In Credentials (Simplest)
+### Option A: user's signed-in credentials (simplest)
 
-The user signs in to the CLI once, and your bundled app uses those credentials. No extra code needed — this is the default behavior.
+The user signs in to the CLI once, and your app uses those credentials. No extra code needed—this is the default behavior.
 
 ```typescript
-const client = new CopilotClient({
-    cliPath: path.join(__dirname, "vendor", "copilot"),
-    // Default: uses signed-in user credentials
-});
+const client = new CopilotClient();
+// Default: uses signed-in user credentials
 ```
 
-### Option B: Token via Environment Variable
+### Option B: token via environment variable
 
 Ship your app with instructions to set a token, or set it programmatically:
 
 ```typescript
 const client = new CopilotClient({
-    cliPath: path.join(__dirname, "vendor", "copilot"),
     env: {
         COPILOT_GITHUB_TOKEN: getUserToken(),  // Your app provides the token
     },
 });
 ```
 
-### Option C: BYOK (No GitHub Auth Needed)
+### Option C: BYOK (no GitHub auth needed)
 
 If you manage your own model provider keys, users don't need GitHub accounts at all:
 
 ```typescript
-const client = new CopilotClient({
-    cliPath: path.join(__dirname, "vendor", "copilot"),
-});
+const client = new CopilotClient();
 
 const session = await client.createSession({
-    model: "gpt-4.1",
+    model: "gpt-5.4",
     provider: {
         type: "openai",
         baseUrl: "https://api.openai.com/v1",
@@ -233,20 +233,18 @@ const session = await client.createSession({
 
 See the **[BYOK guide](../auth/byok.md)** for full details.
 
-## Session Management
+## Session management
 
-Bundled apps typically want named sessions so users can resume conversations:
+Apps typically want named sessions so users can resume conversations:
 
 ```typescript
-const client = new CopilotClient({
-    cliPath: path.join(__dirname, "vendor", "copilot"),
-});
+const client = new CopilotClient();
 
 // Create a session tied to the user's project
 const sessionId = `project-${projectName}`;
 const session = await client.createSession({
     sessionId,
-    model: "gpt-4.1",
+    model: "gpt-5.4",
 });
 
 // User closes app...
@@ -256,91 +254,7 @@ const resumed = await client.resumeSession(sessionId);
 
 Session state persists at `~/.copilot/session-state/{sessionId}/`.
 
-## Distribution Patterns
-
-### Desktop App (Electron, Tauri)
-
-```mermaid
-flowchart TB
-    subgraph Electron["Desktop App Package"]
-        UI["App UI"] --> Main["Main Process"]
-        Main --> SDK["SDK Client"]
-        SDK --> CLI["Copilot CLI<br/>(in app resources)"]
-    end
-    CLI --> Cloud["☁️ GitHub Copilot"]
-
-    style Electron fill:#0d1117,stroke:#58a6ff,color:#c9d1d9
-```
-
-Include the CLI binary in your app's resources directory:
-
-```typescript
-import { app } from "electron";
-import path from "path";
-
-const cliPath = path.join(
-    app.isPackaged ? process.resourcesPath : __dirname,
-    "copilot"
-);
-
-const client = new CopilotClient({ cliPath });
-```
-
-### CLI Tool
-
-For distributable CLI tools, resolve the path relative to your binary:
-
-```typescript
-import { fileURLToPath } from "url";
-import path from "path";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const cliPath = path.join(__dirname, "..", "vendor", "copilot");
-
-const client = new CopilotClient({ cliPath });
-```
-
-## Platform-Specific Binaries
-
-When distributing for multiple platforms, include the correct binary for each:
-
-```
-my-app/
-├── vendor/
-│   ├── copilot-darwin-arm64    # macOS Apple Silicon
-│   ├── copilot-darwin-x64      # macOS Intel
-│   ├── copilot-linux-x64       # Linux x64
-│   └── copilot-win-x64.exe     # Windows x64
-└── src/
-    └── index.ts
-```
-
-```typescript
-import os from "os";
-
-function getCLIPath(): string {
-    const platform = process.platform;   // "darwin", "linux", "win32"
-    const arch = os.arch();              // "arm64", "x64"
-    const ext = platform === "win32" ? ".exe" : "";
-    const name = `copilot-${platform}-${arch}${ext}`;
-    return path.join(__dirname, "vendor", name);
-}
-
-const client = new CopilotClient({
-    cliPath: getCLIPath(),
-});
-```
-
-## Limitations
-
-| Limitation | Details |
-|------------|---------|
-| **Bundle size** | CLI binary adds to your app's distribution size |
-| **Updates** | You manage CLI version updates in your release cycle |
-| **Platform builds** | Need separate binaries for each OS/architecture |
-| **Single user** | Each bundled CLI instance serves one user |
-
-## When to Move On
+## When to move on
 
 | Need | Next Guide |
 |------|-----------|
@@ -348,8 +262,8 @@ const client = new CopilotClient({
 | Run on a server instead of user machines | [Backend Services](./backend-services.md) |
 | Use your own model keys | [BYOK](../auth/byok.md) |
 
-## Next Steps
+## Next steps
 
-- **[BYOK guide](../auth/byok.md)** — Use your own model provider keys
-- **[Session Persistence](../features/session-persistence.md)** — Advanced session management
-- **[Getting Started tutorial](../getting-started.md)** — Build a complete app
+* **[BYOK guide](../auth/byok.md)**: Use your own model provider keys
+* **[Session Persistence](../features/session-persistence.md)**: Advanced session management
+* **[Getting Started tutorial](../getting-started.md)**: Build a complete app
