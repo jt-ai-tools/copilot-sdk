@@ -430,6 +430,35 @@ unsubscribeIdle();
 <details>
 <summary><strong>Python</strong></summary>
 
+<!-- docs-validate: hidden -->
+```python
+from copilot import CopilotClient
+from copilot.rpc import PermissionDecisionApproveOnce
+from copilot.session_events import SessionEventType
+
+client = CopilotClient()
+
+session = await client.create_session(
+    on_permission_request=lambda req, inv: PermissionDecisionApproveOnce()
+)
+
+# 訂閱所有事件
+unsubscribe = session.on(lambda event: print(f"事件：{event.type}"))
+
+# 在處理器中過濾事件類型
+def handle_event(event):
+    if event.type == SessionEventType.SESSION_IDLE:
+        print("會話已閒置")
+    elif event.type == SessionEventType.ASSISTANT_MESSAGE:
+        print(f"訊息：{event.data.content}")
+
+unsubscribe = session.on(handle_event)
+
+# 之後取消訂閱：
+unsubscribe()
+```
+<!-- /docs-validate: hidden -->
+
 ```python
 # 訂閱所有事件
 unsubscribe = session.on(lambda event: print(f"事件：{event.type}"))

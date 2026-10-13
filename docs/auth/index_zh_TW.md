@@ -296,9 +296,11 @@ const client = new CopilotClient({
 <summary><strong>Python</strong></summary>
 
 ```python
-client = CopilotClient({
-    "use_logged_in_user": False,  // 僅使用明確提供的令牌
-})
+from copilot import CopilotClient
+
+client = CopilotClient(
+    use_logged_in_user=False,  # 使用明確提供或環境變數中的令牌，不讀取已登入用戶憑據
+)
 ```
 
 </details>
